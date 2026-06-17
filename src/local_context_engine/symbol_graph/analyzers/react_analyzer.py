@@ -1,0 +1,153 @@
+"""
+React / TanStack ecosystem relationship inference.
+
+Infers relationships that cannot be extracted from AST alone:
+  - Component → Hook usage
+  - Hook → useQuery/useMutation API endpoint
+  - Context Provider → Consumer components
+  - Page → Component composition
+  - TanStack Router route → Page component
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+
+from local_context_engine.core.types import Relationship, RelationshipType, Symbol, SymbolType
+from local_context_engine.indexer.parsers.base_parser import BaseParser
+
+logger = logging.getLogger(__name__)
+
+# Patterns for detecting JSX component usage: <ComponentName
+_JSX_USAGE_PATTERN = re.compile(r"<([A-Z]\w+)[\s/>]")
+
+# Context.Provider usage: <SomeContext.Provider
+_CONTEXT_PROVIDER_PATTERN = re.compile(r"<(\w+Context)\.Provider")
+
+# useContext(SomeContext) → consuming a context
+_USE_CONTEXT_PATTERN = re.compile(r"useContext\s*\(\s*(\w+Context)\s*\)")
+
+# API endpoint patterns in hooks
+_API_ENDPOINT_PATTERN = re.compile(r"['\"`]/api/[a-z0-9/_-]+['\"`]", re.IGNORECASE)
+
+# TanStack Router: createRoute, createFileRoute
+_TANSTACK_ROUTE_PATTERN = re.compile(
+    r"createRoute\s*\(\s*\{[^}]*component\s*:\s*(\w+)"
+)
+
+
+class ReactAnalyzer:
+    """
+    Infers React/TanStack-specific relationships between indexed symbols.
+
+    Call :meth:`analyze` after all files have been parsed.
+    """
+
+    def analyze(
+        self,
+        symbols: list[Symbol],
+        file_sources: dict[str, str],
+    ) -> list[Relationship]:
+        """
+        Generate React-specific relationships.
+
+        Args:
+            symbols:      All symbols in the repository.
+            file_sources: Map of ``file_path → source_code``.
+
+        Returns:
+            List of inferred :class:`Relationship` objects.
+        """
+        relationships: list[Relationship] = []
+
+        sym_by_name: dict[str, Symbol] = {s.name: s for s in symbols}
+
+        # Component → Hook and Component → Component
+        components = [
+            s for s in symbols
+            if s.symbol_type in (SymbolType.REACT_COMPONENT, SymbolType.REACT_HOOK)
+        ]
+        for component in components:
+            source = file_sources.get(component.file_path, "")
+            if not source:
+                continue
+
+            # JSX usage within the component
+            for match in _JSX_USAGE_PATTERN.finditer(source):
+                used_name = match.group(1)
+                if used_name == component.name:
+                    continue
+                if used_name in sym_by_name:
+                    target = sym_by_name[used_name]
+                    relationships.append(
+                        Relationship(
+                            id=BaseParser.make_rel_id(component.id, used_name, "renders"),
+                            source_symbol_id=component.id,
+                            source_file_path=component.file_path,
+                            target_symbol_id=target.id,
+                            target_name=used_name,
+                            relationship_type=RelationshipType.RENDERS,
+                            confidence=0.9,
+                            metadata={"inferred_by": "jsx_usage"},
+                        )
+                    )
+
+            # Context consumption
+            for match in _USE_CONTEXT_PATTERN.finditer(source):
+                context_name = match.group(1)
+                if context_name in sym_by_name:
+                    target = sym_by_name[context_name]
+                    relationships.append(
+                        Relationship(
+                            id=BaseParser.make_rel_id(component.id, context_name, "consumes"),
+                            source_symbol_id=component.id,
+                            source_file_path=component.file_path,
+                            target_symbol_id=target.id,
+                            target_name=context_name,
+                            relationship_type=RelationshipType.CONSUMES,
+                            confidence=1.0,
+                            metadata={"inferred_by": "useContext"},
+                        )
+                    )
+
+            # API endpoint usage in hooks
+            if component.symbol_type == SymbolType.REACT_HOOK:
+                for match in _API_ENDPOINT_PATTERN.finditer(source):
+                    endpoint = match.group(0).strip("'\"`")
+                    relationships.append(
+                        Relationship(
+                            id=BaseParser.make_rel_id(component.id, endpoint, "queries"),
+                            source_symbol_id=component.id,
+                            source_file_path=component.file_path,
+                            target_symbol_id=None,
+                            target_name=endpoint,
+                            relationship_type=RelationshipType.QUERIES,
+                            confidence=0.8,
+                            metadata={"inferred_by": "api_endpoint", "endpoint": endpoint},
+                        )
+                    )
+
+        # Context Provider → Providing
+        for file_path, source in file_sources.items():
+            for match in _CONTEXT_PROVIDER_PATTERN.finditer(source):
+                context_name = match.group(1)
+                if context_name in sym_by_name:
+                    import uuid
+                    provider_sym_id = str(
+                        uuid.uuid5(uuid.NAMESPACE_URL, f"{file_path}::provider::{context_name}")
+                    )
+                    relationships.append(
+                        Relationship(
+                            id=BaseParser.make_rel_id(provider_sym_id, context_name, "provides"),
+                            source_symbol_id=provider_sym_id,
+                            source_file_path=file_path,
+                            target_symbol_id=sym_by_name[context_name].id,
+                            target_name=context_name,
+                            relationship_type=RelationshipType.PROVIDES,
+                            confidence=0.95,
+                            metadata={"inferred_by": "context_provider_usage"},
+                        )
+                    )
+
+        return relationships

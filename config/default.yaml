@@ -1,0 +1,294 @@
+# ============================================================
+# Local Context Engine — Default Configuration
+# ============================================================
+# All processing is local. No code, embeddings, or metadata
+# ever leaves this machine.
+# ============================================================
+
+# ── Embedding Model ─────────────────────────────────────────
+embedding:
+  # Local-only models. Never requires internet after download.
+  # Options:
+  #   BAAI/bge-small-en-v1.5     → 384-dim, fastest
+  #   BAAI/bge-base-en-v1.5      → 768-dim, balanced
+  #   nomic-ai/nomic-embed-text-v1.5 → 768-dim, best quality
+  #   all-MiniLM-L6-v2           → 384-dim, general purpose
+  model: "BAAI/bge-small-en-v1.5"
+
+  # Compute device: "auto" | "cpu" | "cuda" | "mps"
+  # "auto" detects CUDA → MPS → CPU at startup
+  device: "auto"
+
+  # Model backend: "torch" | "onnx"
+  # "onnx" exports the model on first use then loads via ONNX Runtime
+  # (~1s cold start vs 5-15s for torch). Requires: pip install onnxruntime-gpu
+  backend: "onnx"
+
+  # Batch size for embedding generation
+  batch_size: 32
+
+  # Maximum sequence length (tokens)
+  max_seq_length: 512
+
+  # L2-normalize embeddings for cosine similarity
+  normalize_embeddings: true
+
+  # Local model cache directory (null = HuggingFace default ~/.cache/huggingface)
+  cache_dir: null
+
+  # Query prefix for asymmetric embedding models (BGE requires this)
+  query_prefix: "Represent this sentence for searching relevant passages: "
+
+  # Document prefix (leave empty for most models)
+  document_prefix: ""
+
+
+# ── Vector Store ─────────────────────────────────────────────
+vector_store:
+  # Backend: "faiss" | "chroma" | "qdrant"
+  backend: "faiss"
+
+  # Embedding dimensions (must match model output)
+  # bge-small: 384 | bge-base/nomic: 768
+  dimension: 384
+
+  # FAISS index type: "flat" | "ivf" | "hnsw"
+  # flat  → exact search, any size
+  # hnsw  → approximate, fast, recommended for >10k chunks
+  # ivf   → approximate, memory-efficient for very large sets
+  index_type: "hnsw"
+
+  # HNSW parameters (only used when index_type = "hnsw")
+  hnsw_m: 16
+  hnsw_ef_construction: 200
+  hnsw_ef_search: 50
+
+  # Storage path for vector index files
+  storage_path: ".context/vectors"
+
+
+# ── Metadata Store ────────────────────────────────────────────
+metadata_store:
+  # SQLite database path
+  db_path: ".context/metadata.db"
+
+  # Enable WAL mode for concurrent reads
+  wal_mode: true
+
+  # Connection pool size
+  pool_size: 5
+
+
+# ── Chunking ──────────────────────────────────────────────────
+chunking:
+  # Target chunk size in tokens
+  min_tokens: 50
+  target_tokens: 500
+  max_tokens: 1200
+
+  # Overlap between adjacent chunks from the same file (tokens)
+  overlap_tokens: 50
+
+  # Strategy: "symbol" (preferred) | "line" (fallback)
+  strategy: "symbol"
+
+  # Tokenizer for counting (uses cl100k_base approximation by default)
+  # "approx" uses fast character-based estimation (~4 chars/token)
+  tokenizer: "approx"
+
+
+# ── Security ──────────────────────────────────────────────────
+security:
+  # Enable automatic PII masking before embedding
+  enable_pii_masking: true
+
+  # Patterns that are NEVER indexed under any circumstances
+  # Supports glob patterns with ** wildcard
+  never_index_patterns:
+    - "**/.env"
+    - "**/.env.*"
+    - "**/*.key"
+    - "**/*.pem"
+    - "**/*.crt"
+    - "**/*.cert"
+    - "**/*.cer"
+    - "**/*.p12"
+    - "**/*.pfx"
+    - "**/*.p8"
+    - "**/id_rsa"
+    - "**/id_ecdsa"
+    - "**/id_ed25519"
+    - "**/.ssh/**"
+    - "**/secrets/**"
+    - "**/credentials*"
+    - "**/storage/logs/**"
+    - "**/storage/sessions/**"
+    - "**/storage/framework/cache/**"
+    - "**/storage/framework/sessions/**"
+    - "**/storage/uploads/**"
+    - "**/public/storage/**"
+    - "**/vendor/**"
+    - "**/node_modules/**"
+    - "**/.git/**"
+    - "**/dist/**"
+    - "**/build/**"
+    - "**/.next/**"
+    - "**/.nuxt/**"
+    - "**/coverage/**"
+    - "**/__pycache__/**"
+    - "**/*.pyc"
+    - "**/*.log"
+    - "**/*.lock"
+    - "**/package-lock.json"
+    - "**/composer.lock"
+
+  # Maximum file size to index (bytes). Default 2MB.
+  max_file_size_bytes: 2097152
+
+  # Binary file extensions to skip
+  binary_extensions:
+    - ".exe"
+    - ".dll"
+    - ".so"
+    - ".dylib"
+    - ".bin"
+    - ".obj"
+    - ".o"
+    - ".a"
+    - ".lib"
+    - ".zip"
+    - ".tar"
+    - ".gz"
+    - ".bz2"
+    - ".7z"
+    - ".rar"
+    - ".jpg"
+    - ".jpeg"
+    - ".png"
+    - ".gif"
+    - ".bmp"
+    - ".ico"
+    - ".svg"
+    - ".webp"
+    - ".mp4"
+    - ".mp3"
+    - ".wav"
+    - ".avi"
+    - ".pdf"
+    - ".doc"
+    - ".docx"
+    - ".xls"
+    - ".xlsx"
+    - ".ppt"
+    - ".pptx"
+    - ".woff"
+    - ".woff2"
+    - ".ttf"
+    - ".otf"
+    - ".eot"
+    - ".db"
+    - ".sqlite"
+    - ".sqlite3"
+
+
+# ── PII Masking ────────────────────────────────────────────────
+pii_masking:
+  # Patterns to mask before generating embeddings
+  # Values are replaced with [REDACTED_<TYPE>] placeholders
+  mask_email: true
+  mask_phone: true
+  mask_nic: true           # National Identity Card numbers
+  mask_tin: true           # Tax Identification Numbers
+  mask_vat: true           # VAT registration numbers
+  mask_jwt: true           # JWT tokens
+  mask_api_keys: true      # Generic API key patterns
+  mask_access_tokens: true
+  mask_signed_urls: true   # URLs with signature/token params
+  mask_ip_addresses: false # IPs may be needed for context
+  mask_credit_cards: true
+
+
+# ── Symbol Graph ──────────────────────────────────────────────
+symbol_graph:
+  # Persist graph to disk
+  persist: true
+  storage_path: ".context/graph.pkl"
+
+  # Maximum graph depth for traversal queries
+  max_traversal_depth: 5
+
+
+# ── Retrieval ─────────────────────────────────────────────────
+retrieval:
+  # Number of results to return by default
+  default_limit: 10
+  max_limit: 50
+
+  # Hybrid scoring weights (must sum to 1.0)
+  semantic_weight: 0.50
+  bm25_weight: 0.20
+  symbol_weight: 0.20
+  graph_weight: 0.10
+
+  # Minimum score threshold (0.0 = return all)
+  min_score: 0.05
+
+  # Number of candidates to fetch before reranking
+  candidate_multiplier: 5
+
+
+# ── Agent Memory ──────────────────────────────────────────────
+memory:
+  storage_path: ".context/memory.db"
+
+  # Memories older than this are eligible for forgetting (days)
+  stale_after_days: 90
+
+  # Maximum memories to keep per category
+  max_memories_per_category: 100
+
+
+# ── Indexer Performance ──────────────────────────────────────
+performance:
+  # Number of parallel workers for scanning
+  scan_workers: 4
+
+  # Number of parallel workers for parsing
+  parse_workers: 4
+
+  # Embedding batch size (overrides embedding.batch_size if set)
+  embedding_batch_size: 32
+
+  # Enable incremental indexing (skip unchanged files)
+  incremental: true
+
+  # Hash algorithm for change detection: "md5" | "sha256"
+  hash_algorithm: "md5"
+
+
+# ── MCP Server ────────────────────────────────────────────────
+mcp_server:
+  # Transport: "stdio" | "http"
+  transport: "stdio"
+
+  # HTTP transport settings (only used when transport = "http")
+  host: "127.0.0.1"
+  port: 8765
+
+  # Server name shown to MCP clients
+  name: "local-context-engine"
+  version: "0.1.0"
+
+
+# ── Web Dashboard (optional) ─────────────────────────────────
+web_dashboard:
+  enabled: false
+  host: "127.0.0.1"
+  port: 8766
+
+
+# ── Logging ───────────────────────────────────────────────────
+logging:
+  level: "INFO"   # DEBUG | INFO | WARNING | ERROR
+  format: "rich"  # "rich" | "json" | "plain"
+  file: null      # null = console only

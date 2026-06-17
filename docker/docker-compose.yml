@@ -1,0 +1,67 @@
+---
+# ============================================================
+# Local Context Engine — Docker Compose
+# ============================================================
+# Usage:
+#   docker compose -f docker/docker-compose.yml run --rm index /repo
+#   docker compose -f docker/docker-compose.yml run --rm mcp /repo
+# ============================================================
+
+version: "3.9"
+
+services:
+  # ── Indexer service (one-shot) ──────────────────────────────
+  index:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: local-context-engine:latest
+    command: ["index", "/repo"]
+    volumes:
+      - "${REPO_PATH:-./}:/repo:ro"   # Source repo (read-only)
+      - lce_data:/data                # Index persistence
+    environment:
+      - LCE_EMBEDDING__DEVICE=${EMBEDDING_DEVICE:-cpu}
+      - LCE_EMBEDDING__MODEL=${EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}
+    restart: "no"
+
+  # ── MCP server (long-running, stdio) ────────────────────────
+  mcp:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: local-context-engine:latest
+    command: ["mcp", "/repo"]
+    stdin_open: true
+    tty: false
+    volumes:
+      - "${REPO_PATH:-./}:/repo:ro"
+      - lce_data:/data
+    environment:
+      - LCE_EMBEDDING__DEVICE=${EMBEDDING_DEVICE:-cpu}
+      - LCE_MCP_SERVER__TRANSPORT=stdio
+    restart: unless-stopped
+
+  # ── MCP server (HTTP transport) ──────────────────────────────
+  mcp-http:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: local-context-engine:latest
+    command: ["mcp", "/repo", "--transport", "http"]
+    ports:
+      - "127.0.0.1:8765:8765"    # Localhost only — never expose externally
+    volumes:
+      - "${REPO_PATH:-./}:/repo:ro"
+      - lce_data:/data
+    environment:
+      - LCE_EMBEDDING__DEVICE=${EMBEDDING_DEVICE:-cpu}
+      - LCE_MCP_SERVER__TRANSPORT=http
+      - LCE_MCP_SERVER__PORT=8765
+    restart: unless-stopped
+    profiles:
+      - http
+
+volumes:
+  lce_data:
+    driver: local
