@@ -37,6 +37,7 @@ class EmbeddingConfig(BaseModel):
     max_seq_length: int = Field(512, ge=64, le=8192)
     normalize_embeddings: bool = True
     cache_dir: Path | None = None
+    local_files_only: bool = False
     query_prefix: str = "Represent this sentence for searching relevant passages: "
     document_prefix: str = ""
 

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,8 @@ def create_mcp_server(
         ) from e
 
     repo_root = repo_root or Path.cwd()
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     config = load_config(project_root=repo_root, config_override=config_path)
 
     # ── Lightweight setup (no model loading yet) ──────────────
@@ -81,22 +84,73 @@ def create_mcp_server(
     symbol_graph = SymbolGraph()
     memory = AgentMemory.from_config(config.memory)
 
-    # Embedder and retriever are created lazily — model loading can take
-    # 5–15 s on first run (HuggingFace weights + FAISS index + BM25 corpus).
-    # _init_lock makes _ensure_initialized() safe for concurrent tool calls.
+    # Keep initialization granular. Loading embeddings and BM25 can take
+    # seconds, but many tools only need SQLite, memory, or the symbol graph.
     _embedder: list[Any] = [None]
     _retriever: list[Any] = [None]
-    _initialized = [False]
-    _init_lock = asyncio.Lock()
+    _metadata_initialized = [False]
+    _vector_initialized = [False]
+    _graph_initialized = [False]
+    _memory_initialized = [False]
+    _retrieval_initialized = [False]
+    _metadata_lock = asyncio.Lock()
+    _vector_lock = asyncio.Lock()
+    _graph_lock = asyncio.Lock()
+    _memory_lock = asyncio.Lock()
+    _retrieval_lock = asyncio.Lock()
 
-    async def _ensure_initialized() -> None:
-        if _initialized[0]:
+    async def _ensure_metadata_initialized() -> None:
+        if _metadata_initialized[0]:
             return
-        async with _init_lock:
-            if _initialized[0]:          # double-check after acquiring lock
+        async with _metadata_lock:
+            if _metadata_initialized[0]:
+                return
+            await database.init()
+            _metadata_initialized[0] = True
+
+    async def _ensure_vector_loaded() -> None:
+        if _vector_initialized[0]:
+            return
+        async with _vector_lock:
+            if _vector_initialized[0]:
+                return
+            await asyncio.to_thread(vector_store.load)
+            _vector_initialized[0] = True
+
+    async def _ensure_graph_loaded() -> None:
+        if _graph_initialized[0]:
+            return
+        async with _graph_lock:
+            if _graph_initialized[0]:
+                return
+            await asyncio.to_thread(symbol_graph.load, config.symbol_graph.storage_path)
+            _graph_initialized[0] = True
+
+    async def _ensure_memory_initialized() -> None:
+        if _memory_initialized[0]:
+            return
+        async with _memory_lock:
+            if _memory_initialized[0]:
+                return
+            await asyncio.to_thread(memory.init)
+            _memory_initialized[0] = True
+
+    async def _ensure_retrieval_initialized() -> None:
+        if _retrieval_initialized[0]:
+            return
+
+        await _ensure_metadata_initialized()
+        await _ensure_vector_loaded()
+        await _ensure_graph_loaded()
+
+        async with _retrieval_lock:
+            if _retrieval_initialized[0]:
                 return
             if _embedder[0] is None:
-                _embedder[0] = EmbedderFactory.create(config.embedding)
+                _embedder[0] = await asyncio.to_thread(
+                    EmbedderFactory.create,
+                    config.embedding,
+                )
             if _retriever[0] is None:
                 _retriever[0] = HybridRetriever(
                     embedder=_embedder[0],
@@ -107,12 +161,12 @@ def create_mcp_server(
                     redactor=redactor,
                     symbol_graph=symbol_graph,
                 )
-            await database.init()
-            vector_store.load()
-            symbol_graph.load(config.symbol_graph.storage_path)
             await _retriever[0].initialize()
-            memory.init()
-            _initialized[0] = True
+            _retrieval_initialized[0] = True
+
+    async def _warm_up() -> None:
+        await _ensure_retrieval_initialized()
+        await _ensure_memory_initialized()
 
     # ── Background warmup via FastMCP lifespan ─────────────────
     # Start initialization as soon as the event loop is running so the
@@ -122,7 +176,7 @@ def create_mcp_server(
 
     @asynccontextmanager
     async def lifespan(_server: Any):  # type: ignore[return]
-        warmup = asyncio.create_task(_ensure_initialized())
+        warmup = asyncio.create_task(_warm_up())
 
         def _on_done(task: asyncio.Task) -> None:  # type: ignore[type-arg]
             if task.cancelled():
@@ -173,7 +227,7 @@ def create_mcp_server(
             language:    Filter by language: 'php', 'typescript', 'javascript', 'python'.
             path_filter: Glob pattern to restrict results (e.g. 'app/Http/**').
         """
-        await _ensure_initialized()
+        await _ensure_retrieval_initialized()
 
         from local_context_engine.core.types import Language  # noqa: PLC0415
 
@@ -229,7 +283,7 @@ def create_mcp_server(
             language:    Filter by language.
             limit:       Maximum results.
         """
-        await _ensure_initialized()
+        await _ensure_metadata_initialized()
 
         async with database.session() as session:
             sym_repo = SymbolRepository(session)
@@ -269,7 +323,7 @@ def create_mcp_server(
         Args:
             chunk_id: The chunk_id returned by search_codebase.
         """
-        await _ensure_initialized()
+        await _ensure_metadata_initialized()
 
         async with database.session() as session:
             chunk_repo = ChunkRepository(session)
@@ -305,7 +359,7 @@ def create_mcp_server(
             symbol_name: The symbol to look up (e.g. 'UserService', 'useAuth').
             depth:       How many graph hops to traverse (1–5).
         """
-        await _ensure_initialized()
+        await _ensure_graph_loaded()
 
         symbols = symbol_graph.lookup_by_name(symbol_name)
         if not symbols:
@@ -340,7 +394,7 @@ def create_mcp_server(
             symbol_name: The symbol to analyse (e.g. 'OrderController').
             depth:       Traversal depth (1–5).
         """
-        await _ensure_initialized()
+        await _ensure_graph_loaded()
 
         symbols = symbol_graph.lookup_by_name(symbol_name)
         if not symbols:
@@ -378,7 +432,7 @@ def create_mcp_server(
             from_symbol: Starting symbol name.
             to_symbol:   Target symbol name.
         """
-        await _ensure_initialized()
+        await _ensure_graph_loaded()
 
         from_syms = symbol_graph.lookup_by_name(from_symbol)
         to_syms = symbol_graph.lookup_by_name(to_symbol)
@@ -421,7 +475,9 @@ def create_mcp_server(
 
         Includes file counts by language, top symbol types, and framework detection.
         """
-        await _ensure_initialized()
+        await _ensure_metadata_initialized()
+        await _ensure_vector_loaded()
+        await _ensure_graph_loaded()
 
         async with database.session() as session:
             file_repo = FileRepository(session)
@@ -463,7 +519,7 @@ def create_mcp_server(
             code_snippet: A code snippet to search for similar patterns.
             limit:        Maximum results (1–20).
         """
-        await _ensure_initialized()
+        await _ensure_retrieval_initialized()
 
         search_query = SearchQuery(
             text=code_snippet,
@@ -496,7 +552,7 @@ def create_mcp_server(
         Args:
             limit: Maximum number of files to return (1–100).
         """
-        await _ensure_initialized()
+        await _ensure_metadata_initialized()
 
         async with database.session() as session:
             file_repo = FileRepository(session)
@@ -543,7 +599,7 @@ def create_mcp_server(
                       domain, tooling, general.
             tags:     Optional tags for later filtering.
         """
-        await _ensure_initialized()
+        await _ensure_memory_initialized()
 
         try:
             cat = MemoryCategory(category.lower())
@@ -571,7 +627,7 @@ def create_mcp_server(
             category: Optional category filter.
             limit:    Maximum results.
         """
-        await _ensure_initialized()
+        await _ensure_memory_initialized()
 
         cat = None
         if category:
@@ -605,7 +661,9 @@ def create_mcp_server(
         Useful for understanding what has been indexed and the health
         of the context engine.
         """
-        await _ensure_initialized()
+        await _ensure_metadata_initialized()
+        await _ensure_vector_loaded()
+        await _ensure_graph_loaded()
         return await explain_architecture()
 
     return mcp

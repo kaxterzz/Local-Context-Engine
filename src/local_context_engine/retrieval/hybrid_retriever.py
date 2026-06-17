@@ -22,6 +22,7 @@ import logging
 from dataclasses import dataclass, field
 
 from local_context_engine.core.config import RetrievalConfig
+from local_context_engine.core.exceptions import ModelNotAvailableError
 from local_context_engine.core.types import SearchQuery, SearchResult
 from local_context_engine.indexer.embedder.base_embedder import BaseEmbedder
 from local_context_engine.metadata_store.database import Database
@@ -93,6 +94,7 @@ class HybridRetriever:
         self._config = config
         self._redactor = redactor
         self._graph = symbol_graph
+        self._semantic_available = True
 
     async def initialize(self) -> None:
         """Build the BM25 corpus from the metadata store."""
@@ -102,7 +104,11 @@ class HybridRetriever:
 
         if all_contents:
             chunk_ids, texts = zip(*all_contents)
-            self._bm25.add_documents(list(chunk_ids), list(texts))
+            await asyncio.to_thread(
+                self._bm25.add_documents,
+                list(chunk_ids),
+                list(texts),
+            )
             logger.info("BM25 corpus built: %d documents.", len(all_contents))
         else:
             logger.warning("No chunks found for BM25 index. Run 'context index' first.")
@@ -117,29 +123,38 @@ class HybridRetriever:
         Returns:
             Ranked list of :class:`SearchResult` objects.
         """
-        if self._vector_store.total_vectors == 0:
-            logger.warning("Vector store is empty. Run 'context index' first.")
-            return []
-
         candidates_count = min(
             query.limit * self._config.candidate_multiplier,
             self._config.max_limit * self._config.candidate_multiplier,
         )
 
         # ── 1. Semantic search ─────────────────────────────────
-        loop = asyncio.get_event_loop()
-        query_embedding = await loop.run_in_executor(
-            None, self._embedder.embed_query, query.text
-        )
+        semantic_results = []
+        if not self._semantic_available:
+            logger.warning("Semantic search unavailable; using keyword search only.")
+        elif self._vector_store.total_vectors == 0:
+            logger.warning("Vector store is empty; falling back to keyword search.")
+        else:
+            try:
+                loop = asyncio.get_event_loop()
+                query_embedding = await loop.run_in_executor(
+                    None, self._embedder.embed_query, query.text
+                )
 
-        # Build metadata filter
-        meta_filter: dict | None = None
-        if query.language_filter:
-            meta_filter = {"language": query.language_filter.value}
+                # Build metadata filter
+                meta_filter: dict | None = None
+                if query.language_filter:
+                    meta_filter = {"language": query.language_filter.value}
 
-        semantic_results = self._vector_store.search_vectors(
-            query_embedding, k=candidates_count, filter_metadata=meta_filter
-        )
+                semantic_results = self._vector_store.search_vectors(
+                    query_embedding, k=candidates_count, filter_metadata=meta_filter
+                )
+            except ModelNotAvailableError as exc:
+                self._semantic_available = False
+                logger.warning(
+                    "Semantic search unavailable; falling back to keyword search: %s",
+                    exc,
+                )
 
         # ── 2. BM25 keyword search ─────────────────────────────
         bm25_results = self._bm25.search(query.text, k=candidates_count)

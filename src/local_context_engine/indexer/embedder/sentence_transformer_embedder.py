@@ -22,6 +22,7 @@ All inference runs on the local device — no cloud calls.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import numpy as np
@@ -71,6 +72,7 @@ class SentenceTransformerEmbedder(BaseEmbedder):
         device: str = "cpu",
         backend: str = "torch",
         cache_dir: Path | None = None,
+        local_files_only: bool = False,
         normalize_embeddings: bool = True,
         query_prefix: str = "",
         document_prefix: str = "",
@@ -80,6 +82,7 @@ class SentenceTransformerEmbedder(BaseEmbedder):
         self._device = device
         self._backend = backend
         self._cache_dir = str(cache_dir) if cache_dir else None
+        self._local_files_only = local_files_only
         self._normalize = normalize_embeddings
         self._batch_size = batch_size
 
@@ -113,6 +116,8 @@ class SentenceTransformerEmbedder(BaseEmbedder):
                 kwargs["backend"] = self._backend
             if self._cache_dir:
                 kwargs["cache_folder"] = self._cache_dir
+            if self._local_files_only or os.environ.get("HF_HUB_OFFLINE") == "1":
+                kwargs["local_files_only"] = True
             if self._model_name in _TRUST_REMOTE_CODE_MODELS:
                 kwargs["trust_remote_code"] = True
 
@@ -121,7 +126,10 @@ class SentenceTransformerEmbedder(BaseEmbedder):
                 self._model_name, self._device, self._backend,
             )
             self._model = SentenceTransformer(self._model_name, **kwargs)
-            get_dim = getattr(self._model, "get_embedding_dimension", None) or self._model.get_sentence_embedding_dimension
+            get_dim = (
+                getattr(self._model, "get_embedding_dimension", None)
+                or self._model.get_sentence_embedding_dimension
+            )
             self._dimension = get_dim()
             logger.info(
                 "Model loaded: %s | dimension=%d", self._model_name, self._dimension
@@ -197,6 +205,7 @@ class SentenceTransformerEmbedder(BaseEmbedder):
             device=config.device,
             backend=config.backend,
             cache_dir=config.cache_dir,
+            local_files_only=config.local_files_only,
             normalize_embeddings=config.normalize_embeddings,
             query_prefix=config.query_prefix,
             document_prefix=config.document_prefix,
