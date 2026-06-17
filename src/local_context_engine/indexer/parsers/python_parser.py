@@ -25,6 +25,18 @@ from local_context_engine.core.types import (
 from local_context_engine.indexer.parsers.base_parser import BaseParser, ParseResult
 
 logger = logging.getLogger(__name__)
+_PY_CONSTANT_PATTERN = re.compile(
+    r"^\s*([A-Z][A-Z0-9_]+)\s*(?::[^=]+)?=\s*.+$",
+    re.MULTILINE,
+)
+_PY_TYPE_ALIAS_PATTERN = re.compile(
+    r"^\s*type\s+([A-Za-z_]\w*)\s*=\s*.+$",
+    re.MULTILINE,
+)
+_PY_TYPED_ALIAS_PATTERN = re.compile(
+    r"^\s*([A-Za-z_]\w*)\s*:\s*TypeAlias\s*=\s*.+$",
+    re.MULTILINE,
+)
 
 
 class PythonParser(BaseParser):
@@ -63,6 +75,7 @@ class PythonParser(BaseParser):
                 self._parse_treesitter(source, file_id, file_path, result)
             else:
                 self._parse_regex(source, file_id, file_path, result)
+            self._extract_supplemental_symbols(source, file_id, file_path, result)
         except Exception as exc:
             logger.error("Python parse error in %s: %s", file_path, exc)
             result.errors.append(str(exc))
@@ -200,6 +213,48 @@ class PythonParser(BaseParser):
                 )
             )
 
+    def _extract_supplemental_symbols(
+        self,
+        source: str,
+        file_id: str,
+        file_path: str,
+        result: ParseResult,
+    ) -> None:
+        """
+        Add broader Python coverage for constants and type aliases.
+
+        Tree-sitter already handles classes, methods, functions, and imports.
+        These additional patterns capture common module-level and class-level
+        declarations that are useful for navigation and search.
+        """
+        existing_symbol_ids = {symbol.id for symbol in result.symbols}
+
+        for pattern, symbol_type in (
+            (_PY_TYPE_ALIAS_PATTERN, SymbolType.TYPE_ALIAS),
+            (_PY_TYPED_ALIAS_PATTERN, SymbolType.TYPE_ALIAS),
+            (_PY_CONSTANT_PATTERN, SymbolType.CONSTANT),
+        ):
+            for match in pattern.finditer(source):
+                name = match.group(1)
+                line_start = source[: match.start()].count("\n") + 1
+                sym_id = self.make_symbol_id(file_id, name, line_start)
+                if sym_id in existing_symbol_ids:
+                    continue
+                result.symbols.append(
+                    Symbol(
+                        id=sym_id,
+                        file_id=file_id,
+                        file_path=file_path,
+                        name=name,
+                        qualified_name=name,
+                        symbol_type=symbol_type,
+                        line_start=line_start,
+                        line_end=line_start,
+                        language=Language.PYTHON,
+                    )
+                )
+                existing_symbol_ids.add(sym_id)
+
     def _parse_regex(self, source, file_id, file_path, result):
         """Regex fallback for Python parsing."""
         for match in re.finditer(r"^class\s+(\w+)(?:\(([^)]*)\))?", source, re.MULTILINE):
@@ -214,7 +269,7 @@ class PythonParser(BaseParser):
                 )
             )
 
-        for match in re.finditer(r"^def\s+(\w+)\s*\(", source, re.MULTILINE):
+        for match in re.finditer(r"^\s*(?:async\s+)?def\s+(\w+)\s*\(", source, re.MULTILINE):
             name = match.group(1)
             line = source[: match.start()].count("\n") + 1
             sym_id = self.make_symbol_id(file_id, name, line)

@@ -66,6 +66,37 @@ _LARAVEL_TYPE_HINTS: dict[str, SymbolType] = {
 
 # Migration: if filename starts with timestamp and contains _create_ or _add_
 _MIGRATION_PATTERN = re.compile(r"\d{4}_\d{2}_\d{2}_\d{6}_", re.IGNORECASE)
+_PHP_IMPORT_PATTERN = re.compile(
+    r"^\s*use\s+(?!function\b|const\b)([^;]+);",
+    re.MULTILINE,
+)
+_PHP_CLASS_HEADER_PATTERN = re.compile(
+    r"(?m)^(?P<indent>\s*)"
+    r"(?:(?:abstract|final|readonly)\s+)?"
+    r"(?P<kind>class|interface|trait|enum)\s+"
+    r"(?P<name>\w+)"
+    r"(?:\s+extends\s+(?P<extends>[^\{\n]+?))?"
+    r"(?:\s+implements\s+(?P<implements>[^\{\n]+?))?"
+    r"\s*\{"
+)
+_PHP_CLASS_CONST_PATTERN = re.compile(
+    r"^\s*(?:public|protected|private)?\s*const\s+([A-Z_][A-Z0-9_]*)\b",
+    re.MULTILINE,
+)
+_PHP_PROPERTY_PATTERN = re.compile(
+    r"^\s*(?:public|protected|private)\s+"
+    r"(?:static\s+)?(?:readonly\s+)?"
+    r"(?:[\w\\|?]+\s+)?\$(\w+)\b",
+    re.MULTILINE,
+)
+_PHP_TRAIT_USE_PATTERN = re.compile(
+    r"^\s*use\s+([A-Za-z_\\][\w\\]*)\s*;",
+    re.MULTILINE,
+)
+_PHP_GLOBAL_CONST_PATTERN = re.compile(
+    r"^\s*const\s+([A-Z_][A-Z0-9_]*)\b",
+    re.MULTILINE,
+)
 
 
 def _infer_laravel_type(
@@ -152,6 +183,7 @@ class PHPParser(BaseParser):
                 self._parse_treesitter(source, file_id, file_path, result)
             else:
                 self._parse_regex(source, file_id, file_path, result)
+            self._extract_supplemental_symbols(source, file_id, file_path, result)
         except Exception as exc:
             logger.error("PHP parse error in %s: %s", file_path, exc)
             result.errors.append(str(exc))
@@ -164,7 +196,6 @@ class PHPParser(BaseParser):
     ) -> None:
         tree = self._parser.parse(bytes(source, "utf-8"))
         root = tree.root_node
-        lines = source.splitlines()
 
         namespace = self._extract_namespace(root)
         self._extract_classes(root, source, file_id, file_path, namespace, result)
@@ -387,8 +418,6 @@ class PHPParser(BaseParser):
         self, source: str, file_id: str, file_path: str, result: ParseResult
     ) -> None:
         """Regex-based PHP symbol extraction (fallback when Tree-sitter unavailable)."""
-        lines = source.splitlines()
-
         # Namespace
         ns_match = re.search(r"^namespace\s+([\w\\]+)\s*;", source, re.MULTILINE)
         namespace = ns_match.group(1) if ns_match else ""
@@ -439,6 +468,234 @@ class PHPParser(BaseParser):
                     language=Language.PHP,
                 )
             )
+
+    def _extract_supplemental_symbols(
+        self,
+        source: str,
+        file_id: str,
+        file_path: str,
+        result: ParseResult,
+    ) -> None:
+        """
+        Add broader PHP coverage for imports, properties, constants, implements,
+        and trait use relationships using source-level heuristics.
+        """
+        existing_symbol_ids = {symbol.id for symbol in result.symbols}
+        existing_rel_ids = {relationship.id for relationship in result.relationships}
+
+        class_symbols_by_line: dict[int, Symbol] = {
+            symbol.line_start: symbol
+            for symbol in result.symbols
+            if symbol.symbol_type
+            in {
+                SymbolType.CLASS,
+                SymbolType.INTERFACE,
+                SymbolType.TRAIT,
+                SymbolType.ENUM,
+                SymbolType.CONTROLLER,
+                SymbolType.MODEL,
+                SymbolType.SERVICE,
+                SymbolType.REPOSITORY,
+                SymbolType.POLICY,
+                SymbolType.MIDDLEWARE,
+                SymbolType.EVENT,
+                SymbolType.LISTENER,
+                SymbolType.JOB,
+                SymbolType.COMMAND,
+                SymbolType.REQUEST,
+                SymbolType.RESOURCE,
+                SymbolType.NOTIFICATION,
+                SymbolType.OBSERVER,
+                SymbolType.RULE,
+                SymbolType.PROVIDER,
+                SymbolType.SEEDER,
+                SymbolType.FACTORY,
+                SymbolType.MIGRATION,
+            }
+        }
+
+        # Top-level imports. Restrict to the region before the first class-like
+        # declaration so trait "use" statements inside classes are not counted
+        # as imports.
+        first_class_like = _PHP_CLASS_HEADER_PATTERN.search(source)
+        import_region = source[: first_class_like.start()] if first_class_like else source
+        for match in _PHP_IMPORT_PATTERN.finditer(import_region):
+            target = match.group(1).strip()
+            target_name = target.split("\\")[-1].split(" as ")[0].strip()
+            rel_id = self.make_rel_id(file_id, target, "imports")
+            if rel_id not in existing_rel_ids:
+                result.relationships.append(
+                    Relationship(
+                        id=rel_id,
+                        source_symbol_id=file_id,
+                        source_file_path=file_path,
+                        target_symbol_id=None,
+                        target_name=target_name,
+                        relationship_type=RelationshipType.IMPORTS,
+                        metadata={"import": target},
+                    )
+                )
+                existing_rel_ids.add(rel_id)
+
+        # Global constants.
+        for match in _PHP_GLOBAL_CONST_PATTERN.finditer(import_region):
+            const_name = match.group(1)
+            line_start = source[: match.start()].count("\n") + 1
+            sym_id = self.make_symbol_id(file_id, const_name, line_start)
+            if sym_id in existing_symbol_ids:
+                continue
+            result.symbols.append(
+                Symbol(
+                    id=sym_id,
+                    file_id=file_id,
+                    file_path=file_path,
+                    name=const_name,
+                    qualified_name=const_name,
+                    symbol_type=SymbolType.CONSTANT,
+                    line_start=line_start,
+                    line_end=line_start,
+                    language=Language.PHP,
+                )
+            )
+            existing_symbol_ids.add(sym_id)
+
+        # Class-like blocks: implements, class constants, properties, trait uses.
+        for match in _PHP_CLASS_HEADER_PATTERN.finditer(source):
+            kind = match.group("kind")
+            name = match.group("name")
+            header_line = source[: match.start()].count("\n") + 1
+            class_symbol = class_symbols_by_line.get(header_line)
+            if class_symbol is None:
+                class_symbol = next(
+                    (symbol for symbol in result.symbols if symbol.name == name and symbol.line_start == header_line),
+                    None,
+                )
+
+            block = self._extract_php_block(source, match.end() - 1)
+            if block is None:
+                continue
+            body, _body_start, _body_end = block
+
+            if class_symbol and kind == "class" and match.group("implements"):
+                implements = [
+                    part.strip()
+                    for part in match.group("implements").split(",")
+                    if part.strip()
+                ]
+                for interface_name in implements:
+                    rel_id = self.make_rel_id(class_symbol.id, interface_name, "implements")
+                    if rel_id not in existing_rel_ids:
+                        result.relationships.append(
+                            Relationship(
+                                id=rel_id,
+                                source_symbol_id=class_symbol.id,
+                                source_file_path=file_path,
+                                target_symbol_id=None,
+                                target_name=interface_name.split("\\")[-1],
+                                relationship_type=RelationshipType.IMPLEMENTS,
+                            )
+                        )
+                        existing_rel_ids.add(rel_id)
+
+            if class_symbol is None:
+                continue
+
+            body_start_line = source[: match.end()].count("\n") + 1
+            for line_offset, line in enumerate(body.splitlines(), start=1):
+                absolute_line = body_start_line + line_offset
+                stripped = line.strip()
+                if not stripped:
+                    continue
+
+                const_match = _PHP_CLASS_CONST_PATTERN.match(line)
+                if const_match:
+                    const_name = const_match.group(1)
+                    sym_id = self.make_symbol_id(
+                        file_id,
+                        f"{class_symbol.qualified_name}::{const_name}",
+                        absolute_line,
+                    )
+                    if sym_id not in existing_symbol_ids:
+                        result.symbols.append(
+                            Symbol(
+                                id=sym_id,
+                                file_id=file_id,
+                                file_path=file_path,
+                                name=const_name,
+                                qualified_name=f"{class_symbol.qualified_name}::{const_name}",
+                                symbol_type=SymbolType.CONSTANT,
+                                line_start=absolute_line,
+                                line_end=absolute_line,
+                                language=Language.PHP,
+                                parent_id=class_symbol.id,
+                                parent_name=class_symbol.qualified_name,
+                            )
+                        )
+                        existing_symbol_ids.add(sym_id)
+                    continue
+
+                property_match = _PHP_PROPERTY_PATTERN.match(line)
+                if property_match:
+                    property_name = property_match.group(1)
+                    sym_id = self.make_symbol_id(
+                        file_id,
+                        f"{class_symbol.qualified_name}::{property_name}",
+                        absolute_line,
+                    )
+                    if sym_id not in existing_symbol_ids:
+                        result.symbols.append(
+                            Symbol(
+                                id=sym_id,
+                                file_id=file_id,
+                                file_path=file_path,
+                                name=property_name,
+                                qualified_name=f"{class_symbol.qualified_name}::{property_name}",
+                                symbol_type=SymbolType.PROPERTY,
+                                line_start=absolute_line,
+                                line_end=absolute_line,
+                                language=Language.PHP,
+                                parent_id=class_symbol.id,
+                                parent_name=class_symbol.qualified_name,
+                            )
+                        )
+                        existing_symbol_ids.add(sym_id)
+                    continue
+
+                trait_match = _PHP_TRAIT_USE_PATTERN.match(line)
+                if trait_match:
+                    trait_name = trait_match.group(1)
+                    rel_id = self.make_rel_id(class_symbol.id, trait_name, "uses")
+                    if rel_id not in existing_rel_ids:
+                        result.relationships.append(
+                            Relationship(
+                                id=rel_id,
+                                source_symbol_id=class_symbol.id,
+                                source_file_path=file_path,
+                                target_symbol_id=None,
+                                target_name=trait_name.split("\\")[-1],
+                                relationship_type=RelationshipType.USES,
+                            )
+                        )
+                        existing_rel_ids.add(rel_id)
+
+    def _extract_php_block(
+        self, source: str, start_index: int
+    ) -> tuple[str, int, int] | None:
+        """Return the brace-delimited block that starts at or after *start_index*."""
+        open_index = source.find("{", start_index)
+        if open_index == -1:
+            return None
+
+        depth = 0
+        for idx in range(open_index, len(source)):
+            char = source[idx]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return source[open_index + 1 : idx], open_index, idx
+        return None
 
     # ── Tree-sitter helpers ───────────────────────────────────
 

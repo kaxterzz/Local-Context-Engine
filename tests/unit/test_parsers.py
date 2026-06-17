@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from local_context_engine.core.types import Language, SymbolType
+from local_context_engine.core.types import Language, RelationshipType, SymbolType
 from local_context_engine.indexer.parsers.php_parser import PHPParser
 from local_context_engine.indexer.parsers.python_parser import PythonParser
 from local_context_engine.indexer.parsers.typescript_parser import TypeScriptParser
@@ -73,6 +73,40 @@ class TestPHPParser:
         result = parser.parse(source, "f1", "database/migrations/2024_01_01_000000_create_users_table.php")
         migrations = [s for s in result.symbols if s.symbol_type == SymbolType.MIGRATION]
         assert migrations
+
+    def test_extracts_broader_php_symbols(self, parser: PHPParser) -> None:
+        source = """\
+<?php
+
+namespace App\\Services;
+
+use App\\Contracts\\UserContract;
+
+const DEFAULT_LIMIT = 100;
+
+class UserService extends BaseService implements UserContract
+{
+    use Auditable;
+
+    public const VERSION = '1.0';
+    protected string $table = 'users';
+    private static int $cacheSize = 10;
+
+    public function handle() {}
+}
+"""
+        result = parser.parse(source, "f1", "app/Services/UserService.php")
+
+        symbol_pairs = {(s.name, s.symbol_type) for s in result.symbols}
+        assert ("DEFAULT_LIMIT", SymbolType.CONSTANT) in symbol_pairs
+        assert ("VERSION", SymbolType.CONSTANT) in symbol_pairs
+        assert ("table", SymbolType.PROPERTY) in symbol_pairs
+        assert ("cacheSize", SymbolType.PROPERTY) in symbol_pairs
+
+        relationship_types = {r.relationship_type for r in result.relationships}
+        assert RelationshipType.IMPORTS in relationship_types
+        assert RelationshipType.IMPLEMENTS in relationship_types
+        assert RelationshipType.USES in relationship_types
 
 
 class TestTypeScriptParser:
@@ -153,3 +187,22 @@ class TestPythonParser:
     def test_no_crash_on_syntax_error(self, parser: PythonParser) -> None:
         result = parser.parse("def broken(:\n    pass", "f1", "broken.py")
         assert result is not None  # Must return a result, not raise
+
+    def test_extracts_broader_python_symbols(self, parser: PythonParser) -> None:
+        source = """\
+from typing import TypeAlias
+
+MAX_USERS = 100
+UserId: TypeAlias = int
+type UserStatus = str
+
+async def load_users():
+    return []
+"""
+        result = parser.parse(source, "f1", "src/users.py")
+        symbol_pairs = {(s.name, s.symbol_type) for s in result.symbols}
+
+        assert ("MAX_USERS", SymbolType.CONSTANT) in symbol_pairs
+        assert ("UserId", SymbolType.TYPE_ALIAS) in symbol_pairs
+        assert ("UserStatus", SymbolType.TYPE_ALIAS) in symbol_pairs
+        assert ("load_users", SymbolType.FUNCTION) in symbol_pairs
