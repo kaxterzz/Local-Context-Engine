@@ -41,6 +41,8 @@ from local_context_engine.metadata_store.repositories import (
     SymbolRepository,
 )
 from local_context_engine.symbol_graph.graph import SymbolGraph
+from local_context_engine.symbol_graph.analyzers.laravel_analyzer import LaravelAnalyzer
+from local_context_engine.symbol_graph.analyzers.react_analyzer import ReactAnalyzer
 from local_context_engine.vector_store.factory import VectorStoreFactory
 
 logger = logging.getLogger(__name__)
@@ -310,10 +312,21 @@ class IndexingPipeline:
 
         logger.info("Building symbol graph from indexed symbols…")
         async with self._database.session() as session:
+            file_repo = FileRepository(session)
             sym_repo = SymbolRepository(session)
             rel_repo = RelationshipRepository(session)
+            files = await file_repo.get_all()
             symbols = await sym_repo.get_all()
             relationships = await rel_repo.get_all()
+
+        file_sources = self._load_file_sources(files)
+        inferred_relationships = [
+            *ReactAnalyzer().analyze(symbols, file_sources),
+            *LaravelAnalyzer().analyze(symbols, file_sources),
+        ]
+        relationships = list({
+            rel.id: rel for rel in [*relationships, *inferred_relationships]
+        }.values())
 
         self._symbol_graph.clear()
         self._symbol_graph.add_symbols(symbols)
@@ -326,6 +339,23 @@ class IndexingPipeline:
             self._symbol_graph.edge_count,
             resolved,
         )
+
+    def _load_file_sources(self, files: list[FileRecord]) -> dict[str, str]:
+        """Read indexed source files needed by graph analyzers."""
+        sources: dict[str, str] = {}
+        for file_record in files:
+            try:
+                sources[file_record.path] = Path(file_record.absolute_path).read_text(
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except OSError as exc:
+                logger.debug(
+                    "Cannot read %s for graph analysis: %s",
+                    file_record.path,
+                    exc,
+                )
+        return sources
 
     async def _embed_chunks(self, chunks: list[Any], stats: IndexingStats) -> None:
         """Generate embeddings for all chunks and insert into vector store."""
