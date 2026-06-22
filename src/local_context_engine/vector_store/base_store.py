@@ -35,6 +35,11 @@ class BaseVectorStore(ABC):
     def total_vectors(self) -> int:
         """Number of vectors currently stored."""
 
+    @property
+    @abstractmethod
+    def stored_chunk_ids(self) -> set[str]:
+        """Chunk IDs that currently have a stored vector."""
+
     @abstractmethod
     def insert_vectors(
         self,

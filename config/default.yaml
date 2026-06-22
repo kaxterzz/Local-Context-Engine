@@ -20,9 +20,9 @@ embedding:
   device: "auto"
 
   # Model backend: "torch" | "onnx"
-  # "onnx" exports the model on first use then loads via ONNX Runtime
-  # (~1s cold start vs 5-15s for torch). Requires: pip install onnxruntime-gpu
-  backend: "onnx"
+  # "torch" is the safe GPU default. ONNX requires a CUDA-compatible
+  # onnxruntime-gpu installation and can be enabled explicitly.
+  backend: "torch"
 
   # Batch size for embedding generation
   batch_size: 32

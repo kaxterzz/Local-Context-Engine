@@ -29,6 +29,10 @@ class Language(str, Enum):
     JAVASCRIPT = "javascript"
     JSX = "jsx"
     PYTHON = "python"
+    CSHARP = "csharp"
+    DOTNET = "dotnet"
+    ASP = "asp"
+    ASPNET = "aspnet"
     CSS = "css"
     HTML = "html"
     BLADE = "blade"  # Laravel Blade templates
@@ -95,6 +99,13 @@ class SymbolType(str, Enum):
     PROVIDER = "provider"        # Service Provider
     ROUTE = "route"
     RELATIONSHIP = "relationship"
+
+    # Database
+    TABLE = "table"
+    VIEW = "view"
+    STORED_PROCEDURE = "stored_procedure"
+    PROJECT = "project"
+    PACKAGE = "package"
 
     # Generic
     TYPE_ALIAS = "type_alias"

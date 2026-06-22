@@ -1,5 +1,5 @@
 """
-Tree-sitter based code parsers for PHP, TypeScript, JavaScript, and Python.
+Code parsers for PHP, TypeScript, JavaScript, Python, C#, ASP.NET, and SQL.
 
 Each parser extracts structured :class:`~local_context_engine.core.types.Symbol`
 objects and :class:`~local_context_engine.core.types.Relationship` edges

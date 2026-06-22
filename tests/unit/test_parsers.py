@@ -8,6 +8,51 @@ from local_context_engine.core.types import Language, RelationshipType, SymbolTy
 from local_context_engine.indexer.parsers.php_parser import PHPParser
 from local_context_engine.indexer.parsers.python_parser import PythonParser
 from local_context_engine.indexer.parsers.typescript_parser import TypeScriptParser
+from local_context_engine.indexer.parsers.csharp_parser import CSharpParser
+from local_context_engine.indexer.parsers.asp_parser import AspParser
+from local_context_engine.indexer.parsers.sql_parser import SQLParser
+from local_context_engine.indexer.parsers.dotnet_parser import DotNetParser
+
+
+class TestDotNetParsers:
+    def test_dotnet_project_metadata(self) -> None:
+        source = '<Project><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup><ItemGroup><PackageReference Include="Dapper" Version="2.1.0" /></ItemGroup></Project>'
+        result = DotNetParser().parse(source, "f1", "Api.csproj")
+        assert {(s.name, s.symbol_type) for s in result.symbols} == {
+            ("net8.0", SymbolType.CONSTANT), ("Dapper", SymbolType.PACKAGE)
+        }
+
+    def test_csharp_symbols_and_relationships(self) -> None:
+        source = """\
+namespace Example.Api;
+using Microsoft.AspNetCore.Mvc;
+public interface IUserService { }
+public class UsersController : ControllerBase, IUserService {
+    public async Task<IActionResult> GetUser(int id) => Ok(id);
+}
+"""
+        result = CSharpParser().parse(source, "f1", "Controllers/UsersController.cs")
+        by_name = {symbol.name: symbol for symbol in result.symbols}
+        assert by_name["IUserService"].symbol_type == SymbolType.INTERFACE
+        assert by_name["UsersController"].qualified_name == "Example.Api.UsersController"
+        assert by_name["GetUser"].symbol_type == SymbolType.METHOD
+        assert {rel.target_name for rel in result.relationships} == {"ControllerBase", "IUserService"}
+
+    def test_aspnet_directive_and_route(self) -> None:
+        source = '<%@ Page Language="C#" Inherits="Example.HomePage" %>\n@page "/users"'
+        result = AspParser(Language.ASPNET).parse(source, "f1", "Pages/Users.cshtml")
+        assert {symbol.name for symbol in result.symbols} == {"Example.HomePage", "/users"}
+
+    def test_classic_asp_function(self) -> None:
+        result = AspParser(Language.ASP).parse("Function FindUser(id)\nEnd Function", "f1", "default.asp")
+        assert result.symbols[0].name == "FindUser"
+
+    def test_sql_ddl_symbols(self) -> None:
+        source = "CREATE TABLE dbo.Users (Id int);\nCREATE OR ALTER PROCEDURE dbo.GetUsers AS SELECT 1;"
+        result = SQLParser().parse(source, "f1", "schema.sql")
+        assert [(s.name, s.symbol_type) for s in result.symbols] == [
+            ("Users", SymbolType.TABLE), ("GetUsers", SymbolType.STORED_PROCEDURE)
+        ]
 
 
 class TestPHPParser:

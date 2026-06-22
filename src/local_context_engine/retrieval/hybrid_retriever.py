@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 
 from local_context_engine.core.config import RetrievalConfig
@@ -94,7 +95,7 @@ class HybridRetriever:
         self._config = config
         self._redactor = redactor
         self._graph = symbol_graph
-        self._semantic_available = True
+        self._semantic_available = os.environ.get("LCE_DISABLE_SEMANTIC_SEARCH") != "1"
 
     async def initialize(self) -> None:
         """Build the BM25 corpus from the metadata store."""

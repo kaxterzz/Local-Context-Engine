@@ -31,6 +31,24 @@ class TestLanguageDetection:
     def test_python_detection(self) -> None:
         assert detect_language(Path("service.py")) == Language.PYTHON
 
+    @pytest.mark.parametrize("name", ["Program.cs", "HomeController.aspx.cs"])
+    def test_csharp_detection(self, name: str) -> None:
+        assert detect_language(Path(name)) == Language.CSHARP
+
+    @pytest.mark.parametrize("name", ["App.sln", "Api.csproj", "Common.props", "Build.targets"])
+    def test_dotnet_project_detection(self, name: str) -> None:
+        assert detect_language(Path(name)) == Language.DOTNET
+
+    @pytest.mark.parametrize("name", ["Index.cshtml", "App.razor", "Default.aspx", "Widget.ascx", "Site.master"])
+    def test_aspnet_detection(self, name: str) -> None:
+        assert detect_language(Path(name)) == Language.ASPNET
+
+    def test_classic_asp_detection(self) -> None:
+        assert detect_language(Path("default.asp")) == Language.ASP
+
+    def test_sql_detection(self) -> None:
+        assert detect_language(Path("schema.sql")) == Language.SQL
+
     def test_blade_detection(self) -> None:
         assert detect_language(Path("layout.blade.php")) == Language.BLADE
 

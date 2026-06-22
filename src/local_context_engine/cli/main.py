@@ -142,10 +142,13 @@ def cmd_index(
             for err in stats.errors[:10]:
                 console.print(f"  [dim]{err}[/dim]")
 
-    if stats.files_failed == 0:
+    if not stats.errors and stats.files_failed == 0:
         console.print("\n[bold green]Indexing complete![/bold green]")
     else:
-        console.print(f"\n[yellow]Completed with {stats.files_failed} failure(s).[/yellow]")
+        console.print(
+            f"\n[yellow]Indexing ended with {len(stats.errors)} error(s) and "
+            f"{stats.files_failed} file failure(s).[/yellow]"
+        )
 
 
 async def _run_index(pipeline, repo_path, incremental, progress_callback):

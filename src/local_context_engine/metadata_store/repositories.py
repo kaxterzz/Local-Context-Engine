@@ -377,11 +377,18 @@ class ChunkRepository:
         return [row[0] for row in result.all()]
 
     async def mark_embedded(self, chunk_ids: list[str]) -> None:
-        await self._session.execute(
-            update(ChunkModel)
-            .where(ChunkModel.id.in_(chunk_ids))
-            .values(is_embedded=True)
-        )
+        """Mark chunks embedded without exceeding SQLite's variable limit."""
+        # SQLite builds vary between 999 and 32766 bound variables. Keep this
+        # comfortably below both limits because one additional variable is
+        # bound for ``is_embedded`` itself.
+        batch_size = 500
+        for start in range(0, len(chunk_ids), batch_size):
+            batch = chunk_ids[start : start + batch_size]
+            await self._session.execute(
+                update(ChunkModel)
+                .where(ChunkModel.id.in_(batch))
+                .values(is_embedded=True)
+            )
 
     async def count(self) -> int:
         from sqlalchemy import func

@@ -12,7 +12,7 @@ Everything runs locally. No source code, embeddings, metadata, or sensitive info
 |---|---|
 | **100% local** | No cloud APIs. No telemetry. No analytics. |
 | **Privacy-first** | PII masking before embeddings. File blacklisting before scanning. |
-| **Tree-sitter parsing** | Accurate symbol extraction for PHP, TypeScript, JavaScript, Python |
+| **Code parsing** | Accurate symbol extraction for PHP, TypeScript, JavaScript, Python, C#, ASP.NET, and SQL |
 | **Laravel-aware** | Understands Controllers, Models, Services, Repositories, Migrations, Events |
 | **React-aware** | Understands components, hooks, TanStack Query, TanStack Router, Context |
 | **Hybrid retrieval** | Semantic (50%) + BM25 (20%) + Symbol (20%) + Graph (10%) |
@@ -31,6 +31,9 @@ Everything runs locally. No source code, embeddings, metadata, or sensitive info
 - **TypeScript / TSX**
 - **JavaScript / JSX**
 - **Python 3.12+**
+- **C# / .NET**
+- **ASP.NET** (Razor and Web Forms) and classic ASP
+- **SQL**
 - CSS / SCSS (partial)
 
 ---

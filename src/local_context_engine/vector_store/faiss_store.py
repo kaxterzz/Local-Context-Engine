@@ -79,6 +79,10 @@ class FAISSVectorStore(BaseVectorStore):
             return 0
         return self._index.ntotal
 
+    @property
+    def stored_chunk_ids(self) -> set[str]:
+        return set(self._chunk_to_id)
+
     # ── Index creation ─────────────────────────────────────────
 
     def _create_index(self):

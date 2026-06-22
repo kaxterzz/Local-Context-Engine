@@ -224,7 +224,7 @@ def create_mcp_server(
         Args:
             query:       Natural language or code query.
             limit:       Maximum number of results (1–50).
-            language:    Filter by language: 'php', 'typescript', 'javascript', 'python'.
+            language:    Filter by language, for example 'csharp', 'dotnet', 'aspnet', or 'sql'.
             path_filter: Glob pattern to restrict results (e.g. 'app/Http/**').
         """
         await _ensure_retrieval_initialized()

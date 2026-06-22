@@ -49,6 +49,22 @@ _EXTENSION_MAP: dict[str, Language] = {
     # Python
     ".py": Language.PYTHON,
     ".pyi": Language.PYTHON,
+    # C# / .NET
+    ".cs": Language.CSHARP,
+    ".csproj": Language.DOTNET,
+    ".fsproj": Language.DOTNET,
+    ".vbproj": Language.DOTNET,
+    ".sln": Language.DOTNET,
+    ".props": Language.DOTNET,
+    ".targets": Language.DOTNET,
+    # ASP.NET Razor and Web Forms templates
+    ".cshtml": Language.ASPNET,
+    ".razor": Language.ASPNET,
+    ".aspx": Language.ASPNET,
+    ".ascx": Language.ASPNET,
+    ".master": Language.ASPNET,
+    # Classic ASP
+    ".asp": Language.ASP,
     # CSS / SCSS / LESS
     ".css": Language.CSS,
     ".scss": Language.CSS,
@@ -87,6 +103,9 @@ _FRAMEWORK_PATTERNS: list[tuple[str, str]] = [
     ("src/App.tsx", "react"),
     ("src/App.jsx", "react"),
     ("vite.config", "react"),
+    # .NET / ASP.NET
+    ("*.sln", "dotnet"),
+    ("*.csproj", "dotnet"),
 ]
 
 
@@ -109,7 +128,7 @@ def detect_framework(repo_root: Path) -> str | None:
     Returns the framework name string or ``None`` if undetected.
     """
     for pattern, framework in _FRAMEWORK_PATTERNS:
-        if (repo_root / pattern).exists():
+        if any(repo_root.glob(pattern)):
             return framework
     return None
 

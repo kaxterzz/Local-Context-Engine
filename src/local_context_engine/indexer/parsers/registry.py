@@ -71,6 +71,10 @@ class ParserRegistry:
         """
         from local_context_engine.indexer.parsers.php_parser import PHPParser
         from local_context_engine.indexer.parsers.python_parser import PythonParser
+        from local_context_engine.indexer.parsers.csharp_parser import CSharpParser
+        from local_context_engine.indexer.parsers.dotnet_parser import DotNetParser
+        from local_context_engine.indexer.parsers.asp_parser import AspParser
+        from local_context_engine.indexer.parsers.sql_parser import SQLParser
         from local_context_engine.indexer.parsers.typescript_parser import TypeScriptParser
 
         registry = cls()
@@ -96,6 +100,13 @@ class ParserRegistry:
 
         # Python
         registry.register(PythonParser())
+
+        # C# / .NET, ASP templates, and SQL
+        registry.register(CSharpParser())
+        registry.register(DotNetParser())
+        registry.register(AspParser(Language.ASP))
+        registry.register(AspParser(Language.ASPNET))
+        registry.register(SQLParser())
 
         logger.info(
             "ParserRegistry initialised with %d parsers: %s",

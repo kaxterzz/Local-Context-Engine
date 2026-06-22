@@ -114,6 +114,26 @@ class SentenceTransformerEmbedder(BaseEmbedder):
             }
             if self._backend != "torch":
                 kwargs["backend"] = self._backend
+            if self._backend == "onnx":
+                # sentence-transformers otherwise selects the first provider
+                # reported by ONNX Runtime. GPU installations commonly report
+                # TensorRT first even when its native DLLs are unavailable.
+                try:
+                    import onnxruntime as ort
+
+                    available = ort.get_available_providers()
+                    preferred = (
+                        "CUDAExecutionProvider"
+                        if self._device == "cuda"
+                        else "CPUExecutionProvider"
+                    )
+                    provider = preferred if preferred in available else "CPUExecutionProvider"
+                    kwargs["model_kwargs"] = {"provider": provider}
+                    logger.info("Selected ONNX execution provider: %s", provider)
+                except ImportError:
+                    # SentenceTransformer will emit the actionable missing
+                    # dependency error when it attempts to load the backend.
+                    pass
             if self._cache_dir:
                 kwargs["cache_folder"] = self._cache_dir
             if self._local_files_only or os.environ.get("HF_HUB_OFFLINE") == "1":

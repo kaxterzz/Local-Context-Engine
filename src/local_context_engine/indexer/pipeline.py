@@ -86,6 +86,14 @@ class IndexingPipeline:
         """Initialise the database and load the vector index."""
         await self._database.init()
         self._vector_store.load()
+        # Recover metadata after an interrupted run where vectors were saved
+        # successfully but the final SQLite status update did not commit.
+        stored_ids = self._vector_store.stored_chunk_ids
+        if stored_ids:
+            async with self._database.session() as session:
+                chunk_repo = ChunkRepository(session)
+                await chunk_repo.mark_embedded(list(stored_ids))
+                await session.commit()
         logger.info("IndexingPipeline initialised.")
 
     async def shutdown(self) -> None:
@@ -190,6 +198,7 @@ class IndexingPipeline:
                 await self._build_symbol_graph()
 
             stats.total_time_seconds = time.monotonic() - total_start
+            stats.total_vectors = self._vector_store.total_vectors
             stats.files_indexed = len(files_to_index) - stats.files_failed
 
             logger.info(
@@ -203,6 +212,8 @@ class IndexingPipeline:
         except Exception as exc:
             logger.exception("Indexing pipeline failed: %s", exc)
             stats.errors.append(str(exc))
+            stats.total_time_seconds = time.monotonic() - total_start
+            stats.total_vectors = self._vector_store.total_vectors
 
         return stats
 
