@@ -54,6 +54,23 @@ _IMMUTABLE_BLOCKLIST: list[str] = [
     "**/public/storage/**",
     # VCS
     "**/.git/**",
+    # Dependency trees — huge, generated, and a memory hazard to index.
+    "**/vendor/**",
+    "**/node_modules/**",
+    "**/__pycache__/**",
+    "**/.venv/**",
+    "**/venv/**",
+    # The engine's own index artifacts. Without this, the vector index,
+    # metadata DB WAL, and graph pickle inside <repo>/.context/ get indexed
+    # and change on every run — a self-indexing feedback loop that re-embeds
+    # forever and bloats the index.
+    "**/.context/**",
+    # SQLite sidecar files (change constantly, pure binary churn)
+    "**/*.db-wal",
+    "**/*.db-shm",
+    "**/*.sqlite-wal",
+    "**/*.sqlite-shm",
+    "**/*-journal",
 ]
 
 # Extensions that indicate binary or non-text files
@@ -66,6 +83,8 @@ _BINARY_EXTENSIONS: frozenset[str] = frozenset(
         ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt",
         ".woff", ".woff2", ".ttf", ".otf", ".eot",
         ".db", ".sqlite", ".sqlite3", ".mdb",
+        ".db-wal", ".db-shm", ".sqlite-wal", ".sqlite-shm",
+        ".pkl", ".pickle", ".index", ".faiss",
         ".pyc", ".pyd", ".pyo",
         ".class", ".jar",
         ".dmg", ".iso", ".img",

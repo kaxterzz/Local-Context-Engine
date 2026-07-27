@@ -256,3 +256,64 @@ LCE_SECURITY__ENABLE_PII_MASKING=false
 LCE_METADATA_STORE__DB_PATH=/data/metadata.db
 LCE_VECTOR_STORE__STORAGE_PATH=/data/vectors
 ```
+
+## Resource Limits (`limits` section)
+
+Bounds that keep memory usage stable regardless of repository size. Each has
+a flat `CONTEXT_*` env alias (in addition to `LCE_LIMITS__*`):
+
+| Setting | Env var | Default | Effect |
+|---|---|---|---|
+| `max_workers` | `CONTEXT_MAX_WORKERS` | 2 | Scan/parse worker threads |
+| `index_batch_size` | `CONTEXT_INDEX_BATCH_SIZE` | 20 | Files per parse+embed batch |
+| `max_queue_size` | `CONTEXT_MAX_QUEUE_SIZE` | 100 | Max chunks buffered before an embed flush |
+| `cache_max_items` | `CONTEXT_CACHE_MAX_ITEMS` | 500 | MCP chunk-read cache entries (LRU) |
+| `cache_ttl_seconds` | `CONTEXT_CACHE_TTL_SECONDS` | 1800 | Chunk-read cache TTL |
+| `max_file_size_mb` | `CONTEXT_MAX_FILE_SIZE_MB` | 5 | Files larger than this are skipped |
+| `memory_soft_limit_mb` | `CONTEXT_MEMORY_SOFT_LIMIT_MB` | 4096 | Shrink batches, flush caches, warn |
+| `memory_hard_limit_mb` | `CONTEXT_MEMORY_HARD_LIMIT_MB` | 6144 | Stop indexing gracefully |
+| `single_instance_per_project` | `CONTEXT_SINGLE_INSTANCE_PER_PROJECT` | true | Refuse duplicate mcp/index processes per project |
+| `bm25_max_docs` | `CONTEXT_BM25_MAX_DOCS` | 100000 | Cap on the in-memory keyword corpus |
+| `bm25_max_tokens_per_doc` | `CONTEXT_BM25_MAX_TOKENS_PER_DOC` | 512 | Tokens kept per document for BM25 |
+
+Diagnostics: `context ps` lists every live engine process (MCP servers and
+indexers) with its project path and current RSS, and sweeps stale entries.
+
+Memory-pressure behaviour: at the soft limit the indexer halves its batch
+size, runs a GC pass, and logs a warning; at the hard limit it stops
+gracefully — everything indexed so far is persisted and the next
+`context index` run resumes incrementally. The MCP server's watchdog flushes
+its caches at the soft limit and additionally drops the BM25 corpus at the
+hard limit (semantic + symbol search keep working).
+
+### Diagnostics & Observability
+
+| Env var | Default | Effect |
+|---|---|---|
+| `CONTEXT_LOG_LEVEL` | `WARNING` | Log level for `context mcp`. Set to `INFO` to emit the watchdog's structured `[status]` lines on stderr. |
+| `CONTEXT_WATCHDOG_INTERVAL_SECONDS` | `15` | How often the MCP server samples RSS and logs status. |
+
+Structured status lines look like:
+
+```
+[status] pid=395245 project=/repo phase=mcp-watchdog rss_mb=136.9 pressure=normal cache_items=0 bm25_docs=248 vectors=248
+[status] pid=12043 project=/repo phase=batch-complete rss_mb=310.2 reason=batch-full files_done=200 files_total=1500 batch_files=20 batch_chunks=87 queue_depth=0 batch_size=20 duration_s=4.31
+```
+
+### Memory Regression Test
+
+`scripts/memory_stress.py` generates a large synthetic repository, indexes it
+with a model-free embedder, and samples RSS throughout:
+
+```bash
+# Quick check
+.venv/bin/python scripts/memory_stress.py --files 600
+
+# Large repo (≈300 MB of source), fail if RSS grows more than 1 GB
+.venv/bin/python scripts/memory_stress.py --files 1500 --scale 10 --max-growth-mb 1024
+
+# With allocation attribution
+.venv/bin/python scripts/memory_stress.py --files 600 --tracemalloc
+```
+
+The `--max-growth-mb` flag makes it a CI-failable regression gate.

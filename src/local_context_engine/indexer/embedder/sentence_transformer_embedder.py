@@ -59,6 +59,27 @@ _TRUST_REMOTE_CODE_MODELS = {
 }
 
 
+def resolve_device(device: str) -> str:
+    """
+    Resolve ``"auto"`` to a concrete torch device.
+
+    Deliberately imports torch only here (not at config-load time) so that
+    lightweight commands and MCP startup do not pay the torch/CUDA RSS cost.
+    """
+    if device != "auto":
+        return device
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return "mps"
+    except ImportError:
+        pass
+    return "cpu"
+
+
 class SentenceTransformerEmbedder(BaseEmbedder):
     """
     Local embedding model powered by ``sentence-transformers``.
@@ -109,6 +130,7 @@ class SentenceTransformerEmbedder(BaseEmbedder):
         try:
             from sentence_transformers import SentenceTransformer
 
+            self._device = resolve_device(self._device)
             kwargs: dict = {
                 "device": self._device,
             }

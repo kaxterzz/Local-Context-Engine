@@ -266,6 +266,46 @@ performance:
   hash_algorithm: "md5"
 
 
+# ── Resource Limits ───────────────────────────────────────────
+# Bounds that keep memory usage stable regardless of repository size.
+# Each setting also has a flat CONTEXT_* environment override, e.g.
+# CONTEXT_INDEX_BATCH_SIZE=20 (see docs/configuration.md).
+limits:
+  # Worker threads for scanning/parsing. Caps performance.*_workers above.
+  max_workers: 2
+
+  # Files parsed + embedded per batch. Peak memory scales with this,
+  # never with repository size.
+  index_batch_size: 20
+
+  # Max chunks buffered before an embed flush is forced.
+  max_queue_size: 100
+
+  # MCP chunk-read cache (LRU + TTL).
+  cache_max_items: 500
+  cache_ttl_seconds: 1800
+
+  # Files larger than this are never indexed. Caps security.max_file_size_bytes.
+  max_file_size_mb: 5
+
+  # Soft limit: shrink batches, flush caches, log a warning.
+  memory_soft_limit_mb: 4096
+
+  # Hard limit: stop indexing gracefully (completed work is persisted;
+  # the next incremental run resumes).
+  memory_hard_limit_mb: 6144
+
+  # Refuse to start a second mcp/index process for the same project path.
+  single_instance_per_project: true
+
+  # Bounds on the in-memory keyword (BM25) corpus.
+  bm25_max_docs: 100000
+  bm25_max_tokens_per_doc: 512
+
+  # Max source files cached during symbol-graph analysis.
+  analyzer_source_cache_files: 64
+
+
 # ── MCP Server ────────────────────────────────────────────────
 mcp_server:
   # Transport: "stdio" | "http"

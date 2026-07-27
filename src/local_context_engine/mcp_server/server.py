@@ -23,13 +23,24 @@ No data leaves the local machine.
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+from local_context_engine.core.cache import TTLLRUCache
 from local_context_engine.core.config import EngineConfig, load_config
+from local_context_engine.core.instance import (
+    InstanceRegistry,
+    MemoryMonitor,
+    MemoryPressure,
+    ProjectLock,
+    ProjectLockError,
+    install_shutdown_handler,
+    log_process_status,
+)
 from local_context_engine.core.types import SearchQuery
 from local_context_engine.indexer.embedder.factory import EmbedderFactory
 from local_context_engine.memory.agent_memory import AgentMemory, MemoryCategory
@@ -70,19 +81,43 @@ def create_mcp_server(
             "fastmcp is required for the MCP server. Run: pip install fastmcp"
         ) from e
 
-    repo_root = repo_root or Path.cwd()
+    repo_root = (repo_root or Path.cwd()).resolve()
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     config = load_config(project_root=repo_root, config_override=config_path)
 
+    # ── Single-instance guard ─────────────────────────────────
+    # Multiple MCP servers for the same project each load a multi-GB
+    # working set (model + vectors + BM25 corpus). Refuse duplicates.
+    if config.limits.single_instance_per_project:
+        lock = ProjectLock(repo_root, role="mcp")
+        if not lock.acquire():
+            raise ProjectLockError(repo_root, "mcp", lock.holder_info())
+        install_shutdown_handler(lock.release)
+
+    registry = InstanceRegistry()
+    registry.register("mcp", repo_root)
+    install_shutdown_handler(registry.unregister)
+
     # ── Lightweight setup (no model loading yet) ──────────────
     database = Database.from_config(config.metadata_store)
     vector_store = VectorStoreFactory.create(config.vector_store)
-    bm25 = BM25Retriever()
+    bm25 = BM25Retriever(
+        max_docs=config.limits.bm25_max_docs,
+        max_tokens_per_doc=config.limits.bm25_max_tokens_per_doc,
+    )
     masker = PIIMasker.from_config(config.pii_masking)
     redactor = ContentRedactor.from_masker(masker)
     symbol_graph = SymbolGraph()
     memory = AgentMemory.from_config(config.memory)
+    chunk_cache = TTLLRUCache(
+        max_items=config.limits.cache_max_items,
+        ttl_seconds=config.limits.cache_ttl_seconds,
+    )
+    memory_monitor = MemoryMonitor(
+        soft_limit_mb=config.limits.memory_soft_limit_mb,
+        hard_limit_mb=config.limits.memory_hard_limit_mb,
+    )
 
     # Keep initialization granular. Loading embeddings and BM25 can take
     # seconds, but many tools only need SQLite, memory, or the symbol graph.
@@ -168,6 +203,48 @@ def create_mcp_server(
         await _ensure_retrieval_initialized()
         await _ensure_memory_initialized()
 
+    # ── Memory watchdog ────────────────────────────────────────
+    # Periodically logs a structured status line and sheds memory when the
+    # soft/hard limits are crossed, instead of letting the OS swap-thrash.
+
+    watchdog_interval = float(os.environ.get("CONTEXT_WATCHDOG_INTERVAL_SECONDS", "15"))
+
+    async def _memory_watchdog(interval_seconds: float = watchdog_interval) -> None:
+        while True:
+            await asyncio.sleep(interval_seconds)
+            pressure = memory_monitor.check()
+            log_process_status(
+                logger,
+                project=repo_root,
+                phase="mcp-watchdog",
+                pressure=pressure.value,
+                cache_items=len(chunk_cache),
+                bm25_docs=bm25.corpus_size,
+                vectors=vector_store.total_vectors,
+            )
+            if pressure is MemoryPressure.NORMAL:
+                continue
+            chunk_cache.clear()
+            if pressure is MemoryPressure.HARD:
+                # Shed the largest optional structure: the BM25 corpus.
+                # Semantic + symbol search keep working without it.
+                logger.critical(
+                    "Hard memory limit reached (%.0f MB >= %d MB): dropping "
+                    "BM25 corpus and caches to avoid OOM. Keyword search is "
+                    "degraded until this server is restarted.",
+                    memory_monitor.rss_mb,
+                    memory_monitor.hard_limit_mb,
+                )
+                bm25.reset()
+            else:
+                logger.warning(
+                    "Soft memory limit reached (%.0f MB >= %d MB): "
+                    "flushed chunk cache.",
+                    memory_monitor.rss_mb,
+                    memory_monitor.soft_limit_mb,
+                )
+            gc.collect()
+
     # ── Background warmup via FastMCP lifespan ─────────────────
     # Start initialization as soon as the event loop is running so the
     # model is warm before the first tool call arrives (Claude Code sends
@@ -177,6 +254,7 @@ def create_mcp_server(
     @asynccontextmanager
     async def lifespan(_server: Any):  # type: ignore[return]
         warmup = asyncio.create_task(_warm_up())
+        watchdog = asyncio.create_task(_memory_watchdog())
 
         def _on_done(task: asyncio.Task) -> None:  # type: ignore[type-arg]
             if task.cancelled():
@@ -191,11 +269,13 @@ def create_mcp_server(
         try:
             yield
         finally:
-            warmup.cancel()
-            try:
-                await warmup
-            except (asyncio.CancelledError, Exception):
-                pass
+            for task in (warmup, watchdog):
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            await database.close()
 
     # ── Build FastMCP server ───────────────────────────────────
     mcp = FastMCP(
@@ -325,6 +405,10 @@ def create_mcp_server(
         """
         await _ensure_metadata_initialized()
 
+        cached = chunk_cache.get(chunk_id)
+        if cached is not None:
+            return cached
+
         async with database.session() as session:
             chunk_repo = ChunkRepository(session)
             chunk = await chunk_repo.get_by_id(chunk_id)
@@ -334,7 +418,7 @@ def create_mcp_server(
 
         safe_content = redactor.redact(chunk.content)
 
-        return {
+        result = {
             "chunk_id": chunk_id,
             "file_path": chunk.file_path,
             "language": chunk.language.value,
@@ -345,6 +429,8 @@ def create_mcp_server(
             "token_count": chunk.token_count,
             "content": safe_content,
         }
+        chunk_cache.put(chunk_id, result)
+        return result
 
     # ─────────────────────────────────────────────────────────
     # Tool: find_references

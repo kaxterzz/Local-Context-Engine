@@ -62,9 +62,12 @@ class Database:
             cursor = dbapi_connection.cursor()  # type: ignore[union-attr]
             cursor.execute("PRAGMA journal_mode=WAL") if self._wal_mode else None
             cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.execute("PRAGMA cache_size=-65536")   # 64 MB page cache
+            # 16 MB page cache per connection — the previous 64 MB multiplied
+            # across pooled connections and processes was a significant fixed
+            # RSS cost for marginal benefit on an indexing workload.
+            cursor.execute("PRAGMA cache_size=-16384")
             cursor.execute("PRAGMA temp_store=MEMORY")
-            cursor.execute("PRAGMA mmap_size=268435456") # 256 MB mmap
+            cursor.execute("PRAGMA mmap_size=268435456") # 256 MB mmap (file-backed, evictable)
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.close()
 

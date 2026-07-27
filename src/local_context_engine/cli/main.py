@@ -104,7 +104,30 @@ def cmd_index(
         )
     )
 
+    from local_context_engine.core.instance import (
+        InstanceRegistry,
+        ProjectLock,
+        install_shutdown_handler,
+    )
     from local_context_engine.indexer.pipeline import IndexingPipeline
+
+    # ── Single-instance guard ─────────────────────────────────
+    if config.limits.single_instance_per_project:
+        lock = ProjectLock(repo_path, role="index")
+        if not lock.acquire():
+            holder = lock.holder_info() or {}
+            err_console.print(
+                f"[red]Another indexing process (pid {holder.get('pid', '?')}) is "
+                f"already running for {repo_path}.[/red]\n"
+                "[dim]Run 'context ps' to inspect it, or set "
+                "CONTEXT_SINGLE_INSTANCE_PER_PROJECT=false to override.[/dim]"
+            )
+            raise typer.Exit(2)
+        install_shutdown_handler(lock.release)
+
+    registry = InstanceRegistry()
+    registry.register("index", repo_path)
+    install_shutdown_handler(registry.unregister)
 
     pipeline = IndexingPipeline.from_config(config)
 
@@ -152,6 +175,28 @@ def cmd_index(
 
 
 async def _run_index(pipeline, repo_path, incremental, progress_callback):
+    import signal
+
+    # Graceful cancellation: first SIGINT/SIGTERM asks the pipeline to stop
+    # at the next batch boundary (already-indexed work is persisted); a
+    # second SIGINT falls through to the default KeyboardInterrupt.
+    loop = asyncio.get_running_loop()
+    installed: list[int] = []
+
+    def _graceful(signum: int) -> None:
+        pipeline.request_stop(f"received signal {signum}")
+        try:
+            loop.remove_signal_handler(signum)
+        except (NotImplementedError, RuntimeError):
+            pass
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _graceful, sig)
+            installed.append(sig)
+        except (NotImplementedError, RuntimeError):
+            pass  # e.g. Windows or non-main thread
+
     await pipeline.initialize()
     try:
         stats = await pipeline.index_repository(
@@ -161,6 +206,11 @@ async def _run_index(pipeline, repo_path, incremental, progress_callback):
         )
     finally:
         await pipeline.shutdown()
+        for sig in installed:
+            try:
+                loop.remove_signal_handler(sig)
+            except (NotImplementedError, RuntimeError, ValueError):
+                pass
     return stats
 
 
@@ -239,7 +289,10 @@ async def _run_search(config, query, limit, language):
     vs = VectorStoreFactory.create(config.vector_store)
     vs.load()
     embedder = EmbedderFactory.create(config.embedding)
-    bm25 = BM25Retriever()
+    bm25 = BM25Retriever(
+        max_docs=config.limits.bm25_max_docs,
+        max_tokens_per_doc=config.limits.bm25_max_tokens_per_doc,
+    )
     masker = PIIMasker.from_config(config.pii_masking)
     redactor = ContentRedactor.from_masker(masker)
     graph = SymbolGraph()
@@ -634,15 +687,37 @@ def cmd_mcp(
         }
       }
     """
+    import os
+
     repo_path = repo_path.resolve()
 
     # Use plain (no-Rich) logging in MCP mode so nothing Unicode-heavy is
     # written to stderr while the stdio JSON-RPC channel is active.
-    configure_logging("WARNING", format="plain")
+    # Default WARNING keeps the channel quiet; set CONTEXT_LOG_LEVEL=INFO to
+    # surface the memory watchdog's structured [status] lines on stderr.
+    log_level = os.environ.get("CONTEXT_LOG_LEVEL", "WARNING").upper()
+    configure_logging(log_level, format="plain")
 
+    from pydantic import ValidationError
+
+    from local_context_engine.core.instance import ProjectLockError
     from local_context_engine.mcp_server.server import create_mcp_server
 
-    mcp = create_mcp_server(repo_root=repo_path, config_path=config_path)
+    try:
+        mcp = create_mcp_server(repo_root=repo_path, config_path=config_path)
+    except ProjectLockError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+    except ValidationError as exc:
+        err_console.print("[red]Invalid configuration:[/red]")
+        for error in exc.errors():
+            location = ".".join(str(p) for p in error["loc"])
+            err_console.print(f"  [yellow]{location}[/yellow]: {error['msg']}")
+        err_console.print(
+            "[dim]Check your CONTEXT_*/LCE_* environment variables and "
+            ".context/config.yaml.[/dim]"
+        )
+        raise typer.Exit(1) from exc
     # In stdio mode stdout is the JSON-RPC channel — suppress the FastMCP
     # startup banner so no non-JSON bytes are written before the first
     # JSON-RPC response.
@@ -655,6 +730,62 @@ def cmd_mcp(
         transport_kwargs["port"] = config.mcp_server.port
 
     mcp.run(transport=transport, show_banner=show_banner, **transport_kwargs)
+
+
+# ─────────────────────────────────────────────────────────────
+# context ps
+# ─────────────────────────────────────────────────────────────
+
+@app.command("ps")
+def cmd_ps() -> None:
+    """
+    List running Local Context Engine processes and their memory usage.
+
+    Shows every live MCP server and indexer registered on this machine,
+    with per-process RSS. Stale entries from crashed processes are swept
+    automatically.
+    """
+    from datetime import datetime
+
+    from local_context_engine.core.instance import InstanceRegistry, current_rss_mb
+
+    instances = InstanceRegistry().list_instances(sweep=True)
+
+    if not instances:
+        console.print("[dim]No Local Context Engine processes are running.[/dim]")
+        return
+
+    table = Table(title="Local Context Engine — Active Instances", header_style="bold")
+    table.add_column("PID", style="cyan", justify="right")
+    table.add_column("Role", style="yellow")
+    table.add_column("Project", style="green")
+    table.add_column("RSS (MB)", justify="right")
+    table.add_column("Started", style="dim")
+
+    total_rss = 0.0
+    for inst in sorted(instances, key=lambda i: i.get("started_at", 0)):
+        rss = inst.get("rss_mb")
+        if rss:
+            total_rss += rss
+        started = inst.get("started_at")
+        started_str = (
+            datetime.fromtimestamp(started).strftime("%Y-%m-%d %H:%M:%S")
+            if started
+            else "?"
+        )
+        table.add_row(
+            str(inst.get("pid", "?")),
+            str(inst.get("role", "?")),
+            str(inst.get("project", "?")),
+            f"{rss:,.1f}" if rss is not None else "?",
+            started_str,
+        )
+
+    console.print(table)
+    console.print(
+        f"[dim]{len(instances)} instance(s) · combined RSS ≈ {total_rss:,.0f} MB · "
+        f"this 'ps' process: {current_rss_mb():.0f} MB[/dim]"
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -703,8 +834,8 @@ def cmd_doctor(
         ("sqlalchemy", "sqlalchemy"),
         ("fastmcp", "fastmcp"),
         ("networkx", "networkx"),
-        ("rank_bm25", "rank-bm25"),
         ("pathspec", "pathspec"),
+        ("psutil", "psutil"),
         ("typer", "typer"),
         ("rich", "rich"),
     ]
@@ -794,7 +925,10 @@ def cmd_benchmark(
         vs = VectorStoreFactory.create(config.vector_store)
         vs.load()
         embedder = EmbedderFactory.create(config.embedding)
-        bm25 = BM25Retriever()
+        bm25 = BM25Retriever(
+            max_docs=config.limits.bm25_max_docs,
+            max_tokens_per_doc=config.limits.bm25_max_tokens_per_doc,
+        )
 
         retriever = HybridRetriever(
             embedder=embedder, vector_store=vs, bm25=bm25,

@@ -303,6 +303,7 @@ context memory list             Browse stored memories
 context memory save <content>   Save agent knowledge
 context mcp      <repo>         Start the MCP server (stdio)
 context mcp      <repo> -t streamable-http  Start persistent HTTP server
+context ps                      List running engine processes + memory usage
 context doctor                  Diagnose configuration issues
 context benchmark               Run performance benchmarks
 ```
@@ -358,6 +359,41 @@ security:
 > Requires: `pip install sentence-transformers[onnx-gpu]` (or `[onnx]` for CPU-only).
 
 See [docs/configuration.md](docs/configuration.md) for all options.
+
+### Resource Limits & Memory Safety
+
+The engine enforces hard memory boundaries so that indexing a large legacy
+repository — or several projects at once — can never exhaust system RAM.
+Every limit can be tuned with a flat environment variable:
+
+```env
+CONTEXT_MAX_WORKERS=2                    # scan/parse worker threads
+CONTEXT_INDEX_BATCH_SIZE=20              # files parsed+embedded per batch
+CONTEXT_MAX_QUEUE_SIZE=100               # max chunks buffered before embed flush
+CONTEXT_CACHE_MAX_ITEMS=500              # MCP chunk-read cache entries (LRU)
+CONTEXT_CACHE_TTL_SECONDS=1800           # chunk-read cache TTL
+CONTEXT_MAX_FILE_SIZE_MB=5               # skip files larger than this
+CONTEXT_MEMORY_SOFT_LIMIT_MB=4096        # shrink batches, flush caches, warn
+CONTEXT_MEMORY_HARD_LIMIT_MB=6144        # stop indexing gracefully
+CONTEXT_SINGLE_INSTANCE_PER_PROJECT=true # refuse duplicate mcp/index processes
+CONTEXT_BM25_MAX_DOCS=100000             # cap on in-memory keyword corpus
+```
+
+Behaviour:
+
+- **One process per project & role.** A second `context mcp` (or `context
+  index`) for the same canonical project path exits immediately with a clear
+  error. The lock is an OS-level `flock` — it is released automatically if
+  the process crashes or is SIGKILLed, so stale locks cannot occur.
+- **Bounded batches.** The indexer never holds the whole repository in RAM;
+  files are parsed, chunked, embedded, and persisted in batches, and all
+  batch references are dropped before the next batch starts.
+- **Soft limit** → batch size halves, caches flush, a warning is logged.
+- **Hard limit** → indexing stops gracefully; completed work is persisted and
+  the next incremental run resumes where it left off.
+- **`context ps`** shows every live engine process with its RSS.
+- **Ctrl-C / SIGTERM** during indexing stops at the next batch boundary and
+  persists completed work.
 
 ---
 

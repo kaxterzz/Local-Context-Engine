@@ -98,19 +98,24 @@ class HybridRetriever:
         self._semantic_available = os.environ.get("LCE_DISABLE_SEMANTIC_SEARCH") != "1"
 
     async def initialize(self) -> None:
-        """Build the BM25 corpus from the metadata store."""
+        """
+        Build the BM25 corpus from the metadata store.
+
+        Streams chunk contents in bounded batches — raw texts are tokenized
+        and discarded batch by batch, so the full corpus text is never
+        resident in memory at once.
+        """
+        self._bm25.reset()
         async with self._database.session() as session:
             chunk_repo = ChunkRepository(session)
-            all_contents = await chunk_repo.get_all_contents()
+            async for batch in chunk_repo.iter_contents_batched():
+                chunk_ids = [row[0] for row in batch]
+                texts = [row[1] for row in batch]
+                await asyncio.to_thread(self._bm25.add_batch, chunk_ids, texts)
 
-        if all_contents:
-            chunk_ids, texts = zip(*all_contents)
-            await asyncio.to_thread(
-                self._bm25.add_documents,
-                list(chunk_ids),
-                list(texts),
-            )
-            logger.info("BM25 corpus built: %d documents.", len(all_contents))
+        if self._bm25.corpus_size:
+            await asyncio.to_thread(self._bm25.finalize)
+            logger.info("BM25 corpus built: %d documents.", self._bm25.corpus_size)
         else:
             logger.warning("No chunks found for BM25 index. Run 'context index' first.")
 
@@ -274,7 +279,10 @@ class HybridRetriever:
         redactor: ContentRedactor | None = None,
         symbol_graph: "SymbolGraph | None" = None,  # type: ignore[name-defined]
     ) -> "HybridRetriever":
-        bm25 = BM25Retriever()
+        bm25 = BM25Retriever(
+            max_docs=config.limits.bm25_max_docs,
+            max_tokens_per_doc=config.limits.bm25_max_tokens_per_doc,
+        )
         return cls(
             embedder=embedder,
             vector_store=vector_store,

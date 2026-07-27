@@ -53,9 +53,6 @@ dependencies = [
     # Vector store
     "faiss-cpu>=1.8.0",
 
-    # Retrieval
-    "rank-bm25>=0.2.2",
-
     # Symbol graph
     "networkx>=3.3",
 
@@ -69,6 +66,7 @@ dependencies = [
     # File system
     "watchdog>=4.0.0",
     "pathspec>=0.12.1",
+    "psutil>=5.9.0",
     "aiofiles>=23.2.1",
 
     # Security / PII

@@ -43,20 +43,13 @@ class EmbeddingConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_device(self) -> "EmbeddingConfig":
+        # NOTE: "auto" is resolved lazily by the embedder at model-load time.
+        # Importing torch here would pull ~400 MB of RSS (plus a CUDA driver
+        # context) into EVERY process that merely loads the config — including
+        # `context stats`, `context ps`, and MCP servers before warm-up.
         allowed = {"cpu", "cuda", "mps", "auto"}
         if self.device not in allowed:
             raise ValueError(f"device must be one of {allowed}, got '{self.device}'")
-        if self.device == "auto":
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    self.device = "cuda"
-                elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-                    self.device = "mps"
-                else:
-                    self.device = "cpu"
-            except ImportError:
-                self.device = "cpu"
         return self
 
 
@@ -222,6 +215,50 @@ class PerformanceConfig(BaseModel):
     hash_algorithm: str = "md5"
 
 
+class LimitsConfig(BaseModel):
+    """
+    Resource limits that keep memory usage bounded.
+
+    Every field can be overridden with a flat ``CONTEXT_*`` environment
+    variable (e.g. ``CONTEXT_INDEX_BATCH_SIZE=20``) or the standard nested
+    form (``LCE_LIMITS__INDEX_BATCH_SIZE=20``).
+    """
+
+    #: Maximum worker threads for scanning/parsing.
+    max_workers: int = Field(2, ge=1, le=32)
+    #: Files parsed + embedded per pipeline batch. Memory scales with this,
+    #: never with repository size.
+    index_batch_size: int = Field(20, ge=1, le=500)
+    #: Maximum chunks buffered before an embed flush is forced.
+    max_queue_size: int = Field(100, ge=1, le=10_000)
+    #: Maximum entries in the MCP chunk read cache.
+    cache_max_items: int = Field(500, ge=0)
+    #: TTL for cached chunk reads, in seconds.
+    cache_ttl_seconds: int = Field(1800, ge=1)
+    #: Files larger than this are never indexed.
+    max_file_size_mb: float = Field(5.0, gt=0)
+    #: Soft RSS limit: reduce batch size, flush caches, warn.
+    memory_soft_limit_mb: int = Field(4096, ge=128)
+    #: Hard RSS limit: stop indexing gracefully.
+    memory_hard_limit_mb: int = Field(6144, ge=256)
+    #: Refuse to start a second MCP/indexer for the same project path.
+    single_instance_per_project: bool = True
+    #: Cap on documents held in the in-memory BM25 corpus.
+    bm25_max_docs: int = Field(100_000, ge=0)
+    #: Tokens kept per document in the BM25 corpus.
+    bm25_max_tokens_per_doc: int = Field(512, ge=16)
+    #: Maximum file sources cached during symbol-graph analysis.
+    analyzer_source_cache_files: int = Field(64, ge=1)
+
+    @model_validator(mode="after")
+    def validate_limits(self) -> "LimitsConfig":
+        if self.memory_hard_limit_mb <= self.memory_soft_limit_mb:
+            raise ValueError(
+                "memory_hard_limit_mb must be greater than memory_soft_limit_mb"
+            )
+        return self
+
+
 class MCPServerConfig(BaseModel):
     """MCP server transport and identity settings."""
 
@@ -272,6 +309,7 @@ class EngineConfig(BaseSettings):
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     performance: PerformanceConfig = Field(default_factory=PerformanceConfig)
+    limits: LimitsConfig = Field(default_factory=LimitsConfig)
     mcp_server: MCPServerConfig = Field(default_factory=MCPServerConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
@@ -371,8 +409,57 @@ def load_config(
     if project_root is not None:
         merged = _resolve_relative_paths(merged, project_root.resolve())
 
-    # 6. Environment variables handled by pydantic-settings
-    return EngineConfig(**merged)
+    # 6. Flat CONTEXT_* environment overrides for resource limits
+    merged = _apply_context_env_overrides(merged)
+
+    # 7. Environment variables handled by pydantic-settings
+    config = EngineConfig(**merged)
+
+    # 8. Derived limits: the flat limits are authoritative when set, and the
+    #    security/performance sections must never exceed them.
+    max_bytes = int(config.limits.max_file_size_mb * 1024 * 1024)
+    if max_bytes < config.security.max_file_size_bytes:
+        config.security.max_file_size_bytes = max_bytes
+    if config.limits.max_workers < config.performance.scan_workers:
+        config.performance.scan_workers = config.limits.max_workers
+    if config.limits.max_workers < config.performance.parse_workers:
+        config.performance.parse_workers = config.limits.max_workers
+
+    return config
+
+
+# Mapping of flat CONTEXT_* environment variables → limits fields.
+_CONTEXT_ENV_MAP: dict[str, str] = {
+    "CONTEXT_MAX_WORKERS": "max_workers",
+    "CONTEXT_INDEX_BATCH_SIZE": "index_batch_size",
+    "CONTEXT_MAX_QUEUE_SIZE": "max_queue_size",
+    "CONTEXT_CACHE_MAX_ITEMS": "cache_max_items",
+    "CONTEXT_CACHE_TTL_SECONDS": "cache_ttl_seconds",
+    "CONTEXT_MAX_FILE_SIZE_MB": "max_file_size_mb",
+    "CONTEXT_MEMORY_SOFT_LIMIT_MB": "memory_soft_limit_mb",
+    "CONTEXT_MEMORY_HARD_LIMIT_MB": "memory_hard_limit_mb",
+    "CONTEXT_SINGLE_INSTANCE_PER_PROJECT": "single_instance_per_project",
+    "CONTEXT_BM25_MAX_DOCS": "bm25_max_docs",
+    "CONTEXT_BM25_MAX_TOKENS_PER_DOC": "bm25_max_tokens_per_doc",
+}
+
+
+def _apply_context_env_overrides(merged: dict[str, Any]) -> dict[str, Any]:
+    """Overlay flat ``CONTEXT_*`` env vars onto the ``limits`` section."""
+    limits = dict(merged.get("limits") or {})
+    for env_name, field_name in _CONTEXT_ENV_MAP.items():
+        raw = os.environ.get(env_name)
+        if raw is None or raw == "":
+            continue
+        value: Any = raw
+        if raw.lower() in ("true", "false", "1", "0", "yes", "no") and field_name == (
+            "single_instance_per_project"
+        ):
+            value = raw.lower() in ("true", "1", "yes")
+        limits[field_name] = value
+    if limits:
+        merged = {**merged, "limits": limits}
+    return merged
 
 
 # ─────────────────────────────────────────────────────────────

@@ -408,11 +408,36 @@ class ChunkRepository:
         return {row[0]: row[1] for row in result}
 
     async def get_all_contents(self) -> list[tuple[str, str]]:
-        """Return [(chunk_id, content)] for full BM25 index rebuild."""
+        """
+        Return [(chunk_id, content)] for full BM25 index rebuild.
+
+        WARNING: materialises every chunk in memory. Prefer
+        :meth:`iter_contents_batched` for large repositories.
+        """
         result = await self._session.execute(
             select(ChunkModel.id, ChunkModel.content)
         )
         return list(result.all())
+
+    async def iter_contents_batched(self, batch_size: int = 2000):
+        """
+        Yield ``[(chunk_id, content), …]`` batches without loading all rows.
+
+        Keeps at most ``batch_size`` chunk contents in memory at a time.
+        """
+        result = await self._session.stream(
+            select(ChunkModel.id, ChunkModel.content).execution_options(
+                yield_per=batch_size
+            )
+        )
+        batch: list[tuple[str, str]] = []
+        async for row in result:
+            batch.append((row[0], row[1]))
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
 
 
 # ─────────────────────────────────────────────────────────────
