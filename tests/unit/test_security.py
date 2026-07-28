@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from local_context_engine.core.config import SecurityConfig
 from local_context_engine.security.file_blacklist import FileBlacklist
 from local_context_engine.security.pii_masker import PIIMasker
 
@@ -133,3 +134,51 @@ class TestPIIMasker:
         masker = PIIMasker()
         assert masker.contains_pii("email@example.com")
         assert not masker.contains_pii("public function store()")
+
+
+class TestExtraNeverIndexPatterns:
+    """
+    Project configs must be able to ADD exclusions without discarding the
+    defaults. YAML lists merge by replacement, so a project-level
+    ``never_index_patterns`` silently re-enables bin/, obj/, packages/ and
+    every designer file — ``extra_never_index_patterns`` avoids that trap.
+    """
+
+    def test_extra_patterns_are_appended_not_replacing(self, tmp_path: Path) -> None:
+        from local_context_engine.core.config import SecurityConfig
+
+        config = SecurityConfig(extra_never_index_patterns=["**/MyVendorLib/**"])
+        bl = FileBlacklist.from_config(config)
+
+        # The extra pattern applies …
+        assert not bl.is_allowed(
+            tmp_path / "src" / "MyVendorLib" / "a.js", relative_to=tmp_path
+        )
+        # … and the defaults still apply.
+        assert not bl.is_allowed(
+            tmp_path / "obj" / "Debug" / "x.cs", relative_to=tmp_path
+        )
+        assert not bl.is_allowed(
+            tmp_path / "Views" / "Home.designer.cs", relative_to=tmp_path
+        )
+        # Real source is untouched.
+        assert bl.is_allowed(
+            tmp_path / "Controllers" / "HomeController.cs", relative_to=tmp_path
+        )
+
+    def test_dotnet_build_output_excluded_by_default(self, tmp_path: Path) -> None:
+        """bin/ holds referenced DLLs in classic ASP.NET, not just bin/Debug/."""
+        bl = FileBlacklist.from_config(SecurityConfig())
+        for rel in [
+            "MIS.UI/bin/Telerik.Web.UI.xml",
+            "MIS.REPORT/bin/Generated.cs",
+            "MIS.DATA/obj/Debug/x.cs",
+            "packages/EntityFramework.6.4.4/lib/EntityFramework.xml",
+            ".vs/config/applicationhost.config",
+            "Pages/Default.aspx.designer.cs",
+            "Properties/AssemblyInfo.cs",
+            "Scripts/jquery-1.10.2.min.js",
+        ]:
+            assert not bl.is_allowed(tmp_path / rel, relative_to=tmp_path), rel
+
+        assert bl.is_allowed(tmp_path / "Pages/Default.aspx.cs", relative_to=tmp_path)

@@ -129,8 +129,52 @@ class SecurityConfig(BaseModel):
             "**/*.log",
             "**/package-lock.json",
             "**/composer.lock",
+            # ── .NET / C# build output and dependencies ──────────
+            # Kept in sync with config/default.yaml. These defaults must
+            # stand alone: EngineConfig() is constructed without YAML in
+            # tests and library use.
+            "**/bin/**",
+            "**/obj/**",
+            "**/packages/**",
+            "**/.vs/**",
+            "**/TestResults/**",
+            "**/*.suo",
+            "**/*.user",
+            "**/*.vspx",
+            "**/*.psess",
+            "**/*.cache",
+            "**/*.nupkg",
+            "**/*.designer.cs",
+            "**/*.Designer.cs",
+            "**/*.g.cs",
+            "**/*.g.i.cs",
+            "**/AssemblyInfo.cs",
+            "**/TemporaryGeneratedFile*",
+            "**/*.rpt",
+            # ── Minified / vendored front-end assets ─────────────
+            "**/*.min.js",
+            "**/*.min.css",
+            "**/*.map",
+            "**/*.bcmap",
+            "**/jquery*.js",
+            "**/bootstrap*.js",
+            "**/modernizr*.js",
+            "**/highcharts*.js",
+            "**/moment*.js",
+            "**/respond*.js",
+            "**/*.src.js",
+            "**/*-vsdoc.js",
+            "**/*.vsdoc.js",
         ]
     )
+    # Patterns ADDED to never_index_patterns rather than replacing it.
+    #
+    # YAML lists are merged by replacement, so a project-level
+    # ``never_index_patterns`` silently discards every default pattern.
+    # Project configs that only need to add a few repo-specific exclusions
+    # should use this field instead — it is concatenated with the defaults.
+    extra_never_index_patterns: list[str] = Field(default_factory=list)
+
     max_file_size_bytes: int = Field(2 * 1024 * 1024, ge=1024)  # 2 MB default
     binary_extensions: list[str] = Field(
         default_factory=lambda: [

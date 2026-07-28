@@ -207,7 +207,10 @@ class FileBlacklist:
 
         assert isinstance(config, SecurityConfig)
         return cls(
-            user_patterns=config.never_index_patterns,
+            user_patterns=[
+                *config.never_index_patterns,
+                *config.extra_never_index_patterns,
+            ],
             max_file_size_bytes=config.max_file_size_bytes,
             extra_binary_extensions=config.binary_extensions,
         )
